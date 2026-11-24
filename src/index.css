@@ -1,0 +1,47 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100dvh;
+    width: 100vw;
+    overflow: hidden;
+    background-color: #09090b;
+    color: #f4f4f5;
+  }
+}
+
+.studio-grid {
+  background-image: radial-gradient(rgba(255, 255, 255, 0.055) 1px, transparent 1px);
+  background-size: 24px 24px;
+}
+
+.vault-scroll::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+
+.vault-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.vault-scroll::-webkit-scrollbar-thumb {
+  background: rgba(161, 161, 170, 0.2);
+  border-radius: 9999px;
+}
+
+.vault-scroll::-webkit-scrollbar-thumb:hover {
+  background: rgba(161, 161, 170, 0.38);
+}
+
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
