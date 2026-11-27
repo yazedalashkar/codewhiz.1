@@ -1,4 +1,4 @@
-export function withTimeout(promise, ms = 9000, timeoutCode = "request-timeout") {
+export function withTimeout(promise, ms = 10000, timeoutCode = "request-timeout") {
   let timer;
   const timeoutPromise = new Promise((_, reject) => {
     timer = setTimeout(() => {
@@ -80,6 +80,15 @@ export function diagnoseError(error, lang = "ar") {
     };
   }
 
+  if (code.includes("popup-blocked")) {
+    return {
+      title: isAr ? "المتصفح منع نافذة تسجيل الدخول" : "Sign-In Popup Blocked",
+      detail: isAr
+        ? "اسمح بالنوافذ المنبثقة لهذا الموقع أو سجّل الدخول باستخدام البريد الإلكتروني وكلمة المرور."
+        : "Allow popups for this site or sign in using email and password instead.",
+    };
+  }
+
   if (code.includes("email-already-in-use")) {
     return {
       title: isAr ? "البريد الإلكتروني مسجّل مسبقاً" : "Email Already Registered",
@@ -141,19 +150,19 @@ export function diagnoseError(error, lang = "ar") {
 
   if (code.includes("gemini-missing-key")) {
     return {
-      title: isAr ? "مفتاح Gemini API غير مقروء" : "Gemini API Key Missing",
+      title: isAr ? "مفتاح Gemini API غير مضبوط" : "Gemini API Key Missing",
       detail: isAr
-        ? "تأكد من وجود VITE_GEMINI_API_KEY في ملف .env ثم أعد تشغيل السيرفر (npm run dev) ليتم تحميله."
-        : "Ensure VITE_GEMINI_API_KEY is set in .env and restart your dev server.",
+        ? "أضف GEMINI_API_KEY (أو VITE_GEMINI_API_KEY) في إعدادات Vercel أو ملف .env، أو استخدم زر الصياغة الذكية المحلية."
+        : "Add GEMINI_API_KEY (or VITE_GEMINI_API_KEY) in Vercel settings or .env, or use the Smart Local Polish option.",
     };
   }
 
   if (googleMsgLower.includes("location is not supported")) {
     return {
-      title: isAr ? "Gemini API غير متاح في الموقع الجغرافي الحالي" : "Unsupported Region for Gemini API",
+      title: isAr ? "منطقة الاتصال غير مدعومة مباشرة من Google" : "Unsupported Region for Direct Gemini API",
       detail: isAr
-        ? "Google تقيّد الوصول المباشر إلى Gemini API من منطقتك الجغرافية. فعّل VPN ثم اضغط زر التوليد مرة أخرى."
-        : "Google restricts Gemini API access in your current region. Enable a VPN and try again.",
+        ? "عند النشر على Vercel سيعمل التوليد تلقائياً عبر خادم الموقع (/api/generate-description) بدون VPN. محلياً فعّل VPN أو استخدم الصياغة الذكية المحلية."
+        : "On Vercel, requests route via /api/generate-description automatically. Locally, enable VPN or use Smart Local Polish.",
     };
   }
 
@@ -161,8 +170,8 @@ export function diagnoseError(error, lang = "ar") {
     return {
       title: isAr ? "مفتاح Gemini API غير صالح" : "Invalid Gemini API Key",
       detail: isAr
-        ? "المفتاح الموجود في VITE_GEMINI_API_KEY غير صحيح أو منسوخ بشكل ناقص. انسخه مجدداً من Google AI Studio."
-        : "The API key in VITE_GEMINI_API_KEY is invalid. Copy a valid key from Google AI Studio.",
+        ? "المفتاح الموجود غير صحيح أو منسوخ بشكل ناقص. انسخه مجدداً من Google AI Studio."
+        : "The provided Gemini API key is invalid. Copy a fresh key from Google AI Studio.",
     };
   }
 
@@ -187,8 +196,8 @@ export function diagnoseError(error, lang = "ar") {
     return {
       title: isAr ? "تم تجاوز حد الطلبات المؤقت (Rate Limit)" : "Gemini Rate Limit Reached",
       detail: isAr
-        ? "تم استهلاك الحد المسموح للدقيقة أو للمشروع. انتظر 30 ثانية وحاول مجدداً."
-        : "Request quota temporarily exceeded. Wait 30 seconds and retry.",
+        ? "تم استهلاك الحد المسموح للدقيقة. انتظر 30 ثانية وحاول مجدداً أو استخدم الصياغة المحلية."
+        : "Request quota temporarily exceeded. Wait 30 seconds or use Local Polish.",
     };
   }
 
@@ -200,8 +209,8 @@ export function diagnoseError(error, lang = "ar") {
       detail:
         googleMsg ||
         (isAr
-          ? "تعذّر الحصول على استجابة صالحة من Gemini API."
-          : "Could not receive a valid response from Gemini API."),
+          ? "تعذّر الحصول على استجابة صالحة من Gemini API. يمكنك استخدام الصياغة الذكية المحلية كبديل فوري."
+          : "Could not receive a valid response from Gemini API. You can use Smart Local Polish instead."),
     };
   }
 

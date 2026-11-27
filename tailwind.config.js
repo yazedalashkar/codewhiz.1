@@ -4,13 +4,16 @@ export default {
   theme: {
     extend: {
       colors: {
-        canvas: "#09090B",
-        surface: "#111114",
+        canvas: "#0A0A0B",
+        surface: "#111113",
         elevated: "#18181B",
-        accent: "#38BDF8",
+        ink: "#F5F3EE",
+        stone: "#9B9A97",
+        accent: "#E85D2A",
       },
       fontFamily: {
-        sans: ['"IBM Plex Sans Arabic"', '"Plus Jakarta Sans"', "system-ui", "sans-serif"],
+        sans: ['"IBM Plex Sans Arabic"', '"Space Grotesk"', "system-ui", "sans-serif"],
+        display: ['"Space Grotesk"', '"IBM Plex Sans Arabic"', "system-ui", "sans-serif"],
         mono: ['"JetBrains Mono"', "monospace"],
       },
     },

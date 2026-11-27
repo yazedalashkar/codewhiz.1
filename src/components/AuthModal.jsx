@@ -1,6 +1,17 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
+import { createPortal } from "react-dom";
 import { motion, AnimatePresence } from "framer-motion";
-import { X, Mail, Lock, User, LogOut, Loader2, AlertCircle } from "lucide-react";
+import { Link } from "react-router-dom";
+import {
+  X,
+  Mail,
+  Lock,
+  User,
+  LogOut,
+  Loader2,
+  AlertCircle,
+  ShieldCheck,
+} from "lucide-react";
 import {
   loginWithGoogle,
   loginWithEmail,
@@ -8,10 +19,12 @@ import {
   logoutUser,
 } from "../lib/firebase";
 import { diagnoseError } from "../lib/diagnostics";
+import { useToast } from "./ToastProvider";
 
 const STUDIO_EASE = [0.22, 1, 0.36, 1];
 
 export default function AuthModal({ isOpen, onClose, lang, userProfile }) {
+  const toast = useToast();
   const [mode, setMode] = useState("login");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -21,6 +34,18 @@ export default function AuthModal({ isOpen, onClose, lang, userProfile }) {
 
   const isBusy = Boolean(loadingAction);
 
+  useEffect(() => {
+    if (!isOpen) {
+      setDiagnostic(null);
+      return;
+    }
+    const onKey = (e) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [isOpen, onClose]);
+
   const handleSubmit = async (e) => {
     e.preventDefault();
     setDiagnostic(null);
@@ -28,12 +53,21 @@ export default function AuthModal({ isOpen, onClose, lang, userProfile }) {
     try {
       if (mode === "login") {
         await loginWithEmail(email, password);
+        toast.success(
+          lang === "ar" ? "تم تسجيل الدخول بنجاح" : "Signed in successfully"
+        );
       } else {
         await registerWithEmail({ email, password, username });
+        toast.success(
+          lang === "ar" ? "تم إنشاء الحساب بنجاح" : "Account created successfully"
+        );
       }
+      setPassword("");
       onClose();
     } catch (err) {
-      setDiagnostic(diagnoseError(err, lang));
+      const info = diagnoseError(err, lang);
+      setDiagnostic(info);
+      toast.error(info.title, info.detail);
     } finally {
       setLoadingAction("");
     }
@@ -44,9 +78,14 @@ export default function AuthModal({ isOpen, onClose, lang, userProfile }) {
     setLoadingAction("google");
     try {
       await loginWithGoogle();
+      toast.success(
+        lang === "ar" ? "تم تسجيل الدخول عبر Google" : "Signed in with Google"
+      );
       onClose();
     } catch (err) {
-      setDiagnostic(diagnoseError(err, lang));
+      const info = diagnoseError(err, lang);
+      setDiagnostic(info);
+      toast.error(info.title, info.detail);
     } finally {
       setLoadingAction("");
     }
@@ -56,13 +95,16 @@ export default function AuthModal({ isOpen, onClose, lang, userProfile }) {
     setLoadingAction("logout");
     try {
       await logoutUser();
+      toast.info(lang === "ar" ? "تم تسجيل الخروج" : "Signed out");
       onClose();
     } finally {
       setLoadingAction("");
     }
   };
 
-  return (
+  if (typeof document === "undefined") return null;
+
+  return createPortal(
     <AnimatePresence>
       {isOpen && (
         <motion.div
@@ -70,41 +112,61 @@ export default function AuthModal({ isOpen, onClose, lang, userProfile }) {
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
           transition={{ duration: 0.2 }}
-          className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4"
+          className="fixed inset-0 z-[80] bg-black/80 backdrop-blur-md flex items-end sm:items-center justify-center sm:p-4"
           onClick={onClose}
         >
           <motion.div
-            initial={{ opacity: 0, y: 12, scale: 0.98 }}
+            initial={{ opacity: 0, y: 36, scale: 0.98 }}
             animate={{ opacity: 1, y: 0, scale: 1 }}
-            exit={{ opacity: 0, y: 8, scale: 0.98 }}
-            transition={{ duration: 0.28, ease: STUDIO_EASE }}
+            exit={{ opacity: 0, y: 24, scale: 0.98 }}
+            transition={{ duration: 0.3, ease: STUDIO_EASE }}
             onClick={(e) => e.stopPropagation()}
-            className="w-full max-w-sm rounded-2xl bg-[#111114] border border-zinc-800 p-6 shadow-2xl relative"
+            className="w-full sm:max-w-sm rounded-t-3xl sm:rounded-2xl bg-[#111113] border-t sm:border border-white/10 p-6 pb-[max(1.5rem,env(safe-area-inset-bottom))] shadow-[0_28px_80px_-15px_rgba(0,0,0,0.9)] relative max-h-[90dvh] overflow-y-auto vault-scroll"
           >
+            {/* Mobile Drag Indicator */}
+            <div className="sm:hidden w-10 h-1 rounded-full bg-white/20 mx-auto mb-4" />
+
             <button
+              type="button"
               onClick={onClose}
-              className="absolute top-4 end-4 w-8 h-8 rounded-lg bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 flex items-center justify-center text-zinc-400 transition-colors"
+              className="absolute top-4 end-4 w-8 h-8 rounded-lg bg-white/[0.05] hover:bg-white/[0.1] border border-white/[0.08] flex items-center justify-center text-[#A8A59E] transition-colors"
+              aria-label="Close"
             >
               <X className="w-4 h-4" />
             </button>
 
             {userProfile ? (
               <div className="text-center space-y-4 py-3">
-                <div className="w-14 h-14 mx-auto rounded-2xl bg-zinc-900 border border-zinc-700 flex items-center justify-center font-mono font-bold text-xl text-zinc-100">
-                  {userProfile.username?.[0]?.toUpperCase()}
+                <div className="w-14 h-14 mx-auto rounded-2xl bg-[#18181B] border border-[#E85D2A]/40 flex items-center justify-center font-mono font-bold text-xl text-[#F5F3EE]">
+                  {userProfile.username?.[0]?.toUpperCase() || "U"}
                 </div>
                 <div>
-                  <h3 className="text-base font-semibold font-mono text-zinc-100">
+                  <h3 className="text-base font-semibold font-mono text-[#F5F3EE]">
                     @{userProfile.username}
                   </h3>
-                  <p className="text-xs text-zinc-500 font-mono mt-0.5">
+                  <p className="text-xs text-[#8A8780] font-mono mt-0.5">
                     {userProfile.email}
                   </p>
                 </div>
+
+                {userProfile.role === "admin" && (
+                  <Link
+                    to="/vault-admin"
+                    onClick={onClose}
+                    className="w-full h-10 rounded-xl bg-[#E85D2A]/15 hover:bg-[#E85D2A]/25 border border-[#E85D2A]/35 text-[#F59E6C] font-semibold text-xs flex items-center justify-center gap-2 transition-colors"
+                  >
+                    <ShieldCheck className="w-4 h-4" />
+                    <span>
+                      {lang === "ar" ? "فتح لوحة الإدارة" : "Open Admin Vault"}
+                    </span>
+                  </Link>
+                )}
+
                 <button
+                  type="button"
                   onClick={handleLogout}
                   disabled={isBusy}
-                  className="w-full h-10 rounded-xl bg-red-500/10 hover:bg-red-500/15 border border-red-500/25 text-red-300 font-medium text-xs flex items-center justify-center gap-2 transition-colors disabled:opacity-50"
+                  className="w-full h-11 rounded-xl bg-rose-500/10 hover:bg-rose-500/15 border border-rose-500/25 text-rose-300 font-medium text-xs flex items-center justify-center gap-2 transition-colors disabled:opacity-50"
                 >
                   {loadingAction === "logout" ? (
                     <Loader2 className="w-3.5 h-3.5 animate-spin" />
@@ -125,7 +187,7 @@ export default function AuthModal({ isOpen, onClose, lang, userProfile }) {
             ) : (
               <>
                 <div className="mb-5">
-                  <h2 className="text-lg font-bold text-zinc-100">
+                  <h2 className="text-lg font-bold text-[#F5F3EE]">
                     {mode === "login"
                       ? lang === "ar"
                         ? "تسجيل الدخول"
@@ -134,7 +196,7 @@ export default function AuthModal({ isOpen, onClose, lang, userProfile }) {
                       ? "إنشاء حساب جديد"
                       : "Create account"}
                   </h2>
-                  <p className="text-xs text-zinc-400 mt-1">
+                  <p className="text-xs text-[#9B9A97] mt-1">
                     {lang === "ar"
                       ? "سجّل دخولك للوصول السريع إلى أرشيف المشاريع"
                       : "Access @codewhiz.1 source archives"}
@@ -145,7 +207,7 @@ export default function AuthModal({ isOpen, onClose, lang, userProfile }) {
                   type="button"
                   onClick={handleGoogle}
                   disabled={isBusy}
-                  className="w-full h-10 rounded-xl bg-zinc-100 hover:bg-white text-zinc-950 font-semibold text-xs flex items-center justify-center gap-2 mb-4 transition-colors disabled:opacity-60"
+                  className="w-full h-11 rounded-xl bg-[#F5F3EE] hover:bg-white text-[#0A0A0B] font-semibold text-xs flex items-center justify-center gap-2 mb-4 transition-colors disabled:opacity-60"
                 >
                   {loadingAction === "google" ? (
                     <Loader2 className="w-4 h-4 animate-spin text-zinc-700" />
@@ -181,44 +243,48 @@ export default function AuthModal({ isOpen, onClose, lang, userProfile }) {
                 </button>
 
                 <div className="relative flex py-1.5 items-center mb-4">
-                  <div className="flex-grow border-t border-zinc-800" />
-                  <span className="flex-shrink mx-3 text-[10px] text-zinc-500 font-mono uppercase">
+                  <div className="flex-grow border-t border-white/[0.08]" />
+                  <span className="flex-shrink mx-3 text-[10px] text-[#787671] font-mono uppercase">
                     {lang === "ar" ? "أو بالبريد" : "or email"}
                   </span>
-                  <div className="flex-grow border-t border-zinc-800" />
+                  <div className="flex-grow border-t border-white/[0.08]" />
                 </div>
 
                 <form onSubmit={handleSubmit} className="space-y-3">
                   {mode === "register" && (
                     <div className="relative">
-                      <User className="w-3.5 h-3.5 text-zinc-500 absolute top-3.5 start-3.5" />
+                      <User className="w-3.5 h-3.5 text-[#787671] absolute top-3.5 start-3.5" />
                       <input
                         type="text"
                         required
                         disabled={isBusy}
-                        placeholder={lang === "ar" ? "اسم المستخدم (Username)" : "Username"}
+                        placeholder={
+                          lang === "ar" ? "اسم المستخدم (Username)" : "Username"
+                        }
                         value={username}
                         onChange={(e) => setUsername(e.target.value)}
-                        className="w-full h-10 ps-9 pe-3 rounded-xl bg-zinc-950 border border-zinc-800 focus:border-zinc-600 outline-none text-xs font-mono text-zinc-100 disabled:opacity-50"
+                        className="w-full h-11 ps-9 pe-3 rounded-xl bg-black/50 border border-white/[0.08] focus:border-[#E85D2A]/60 outline-none text-xs font-mono text-[#F5F3EE] disabled:opacity-50"
                       />
                     </div>
                   )}
 
                   <div className="relative">
-                    <Mail className="w-3.5 h-3.5 text-zinc-500 absolute top-3.5 start-3.5" />
+                    <Mail className="w-3.5 h-3.5 text-[#787671] absolute top-3.5 start-3.5" />
                     <input
                       type="email"
                       required
                       disabled={isBusy}
-                      placeholder={lang === "ar" ? "البريد الإلكتروني" : "Email address"}
+                      placeholder={
+                        lang === "ar" ? "البريد الإلكتروني" : "Email address"
+                      }
                       value={email}
                       onChange={(e) => setEmail(e.target.value)}
-                      className="w-full h-10 ps-9 pe-3 rounded-xl bg-zinc-950 border border-zinc-800 focus:border-zinc-600 outline-none text-xs text-zinc-100 disabled:opacity-50"
+                      className="w-full h-11 ps-9 pe-3 rounded-xl bg-black/50 border border-white/[0.08] focus:border-[#E85D2A]/60 outline-none text-xs text-[#F5F3EE] disabled:opacity-50"
                     />
                   </div>
 
                   <div className="relative">
-                    <Lock className="w-3.5 h-3.5 text-zinc-500 absolute top-3.5 start-3.5" />
+                    <Lock className="w-3.5 h-3.5 text-[#787671] absolute top-3.5 start-3.5" />
                     <input
                       type="password"
                       required
@@ -227,17 +293,17 @@ export default function AuthModal({ isOpen, onClose, lang, userProfile }) {
                       placeholder={lang === "ar" ? "كلمة المرور" : "Password"}
                       value={password}
                       onChange={(e) => setPassword(e.target.value)}
-                      className="w-full h-10 ps-9 pe-3 rounded-xl bg-zinc-950 border border-zinc-800 focus:border-zinc-600 outline-none text-xs text-zinc-100 disabled:opacity-50"
+                      className="w-full h-11 ps-9 pe-3 rounded-xl bg-black/50 border border-white/[0.08] focus:border-[#E85D2A]/60 outline-none text-xs text-[#F5F3EE] disabled:opacity-50"
                     />
                   </div>
 
                   {diagnostic && (
-                    <div className="p-2.5 rounded-xl bg-red-500/10 border border-red-500/25 text-red-200 space-y-1">
+                    <div className="p-2.5 rounded-xl bg-rose-500/10 border border-rose-500/25 text-rose-200 space-y-1">
                       <div className="flex items-center gap-1.5 text-[11px] font-semibold">
-                        <AlertCircle className="w-3.5 h-3.5 text-red-400 shrink-0" />
+                        <AlertCircle className="w-3.5 h-3.5 text-rose-400 shrink-0" />
                         <span>{diagnostic.title}</span>
                       </div>
-                      <p className="text-[11px] text-red-300/90 leading-relaxed">
+                      <p className="text-[11px] text-rose-300/90 leading-relaxed">
                         {diagnostic.detail}
                       </p>
                     </div>
@@ -246,7 +312,7 @@ export default function AuthModal({ isOpen, onClose, lang, userProfile }) {
                   <button
                     type="submit"
                     disabled={isBusy}
-                    className="w-full h-10 rounded-xl bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 text-zinc-100 font-semibold text-xs flex items-center justify-center gap-2 transition-colors disabled:opacity-50"
+                    className="w-full h-11 rounded-xl bg-[#E85D2A] hover:bg-[#F06835] text-[#0A0A0B] font-semibold text-xs flex items-center justify-center gap-2 transition-colors disabled:opacity-50"
                   >
                     {loadingAction === "email" && (
                       <Loader2 className="w-3.5 h-3.5 animate-spin" />
@@ -268,12 +334,13 @@ export default function AuthModal({ isOpen, onClose, lang, userProfile }) {
                 </form>
 
                 <button
+                  type="button"
                   onClick={() => {
                     setDiagnostic(null);
                     setMode(mode === "login" ? "register" : "login");
                   }}
                   disabled={isBusy}
-                  className="w-full mt-4 text-xs text-zinc-400 hover:text-zinc-200 transition-colors text-center"
+                  className="w-full mt-4 text-xs text-[#9B9A97] hover:text-[#F5F3EE] transition-colors text-center"
                 >
                   {mode === "login"
                     ? lang === "ar"
@@ -288,6 +355,7 @@ export default function AuthModal({ isOpen, onClose, lang, userProfile }) {
           </motion.div>
         </motion.div>
       )}
-    </AnimatePresence>
+    </AnimatePresence>,
+    document.body
   );
 }
