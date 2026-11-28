@@ -4,107 +4,106 @@
 
 @layer base {
   html {
-    scroll-behavior: smooth;
-    background-color: #0a0a0b;
-    color: #f5f3ee;
-    overflow-x: hidden;
+    background: #120e24;
+    color: #f3eeff;
+    -webkit-text-size-adjust: 100%;
+    scroll-padding-top: 96px;
   }
-
   body {
+    margin: 0;
     min-height: 100dvh;
-    width: 100%;
-    overflow-x: hidden;
-    background-color: #0a0a0b;
-    color: #f5f3ee;
+    font-family: "Readex Pro", system-ui, sans-serif;
+    background: #120e24;
     -webkit-tap-highlight-color: transparent;
+    text-rendering: optimizeLegibility;
   }
-
   #root {
     min-height: 100dvh;
-    width: 100%;
+    overflow-x: clip;
+  }
+  ::selection {
+    background: #ff5c8a;
+    color: #120e24;
+  }
+  :focus-visible {
+    outline: 2px solid #ffc857;
+    outline-offset: 3px;
+  }
+  button,
+  a {
+    touch-action: manipulation;
+  }
+  input,
+  textarea,
+  select {
+    font-size: 16px; /* stops iOS zoom on focus */
+  }
+  @media (min-width: 768px) {
+    input,
+    textarea,
+    select {
+      font-size: 14px;
+    }
   }
 }
 
-/* Architectural Swiss drafting grid */
-.studio-grid {
-  background-image:
-    linear-gradient(to right, rgba(245, 243, 238, 0.028) 1px, transparent 1px),
-    linear-gradient(to bottom, rgba(245, 243, 238, 0.028) 1px, transparent 1px);
-  background-size: 48px 48px;
+@layer utilities {
+  .pb-safe {
+    padding-bottom: max(env(safe-area-inset-bottom), 12px);
+  }
+  .bottom-dock {
+    bottom: max(env(safe-area-inset-bottom), 12px);
+  }
+  .preserve-3d {
+    transform-style: preserve-3d;
+  }
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+  .no-scrollbar {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+  .grain::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    opacity: 0.07;
+    mix-blend-mode: overlay;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  }
 }
 
-/* Subtle tactile paper/film grain overlay */
-.studio-grain {
-  background-image: radial-gradient(rgba(245, 243, 238, 0.045) 0.75px, transparent 0.75px);
-  background-size: 16px 16px;
+.field {
+  width: 100%;
+  min-height: 46px;
+  padding: 0 14px;
+  border-radius: 14px;
+  background: #120e24;
+  border: 2px solid #2c2560;
+  color: #f3eeff;
+  outline: none;
+  transition: border-color 0.2s;
 }
-
-/* 3D Perspective helpers for scroll sculptures */
-.scene-3d {
-  perspective: 900px;
+.field::placeholder {
+  color: #8d84c4;
 }
-
-.cube-3d {
-  transform-style: preserve-3d;
-  position: relative;
+.field:focus {
+  border-color: #ff5c8a;
 }
-
-.cube-face {
-  position: absolute;
-  inset: 0;
-  border: 1px solid rgba(245, 243, 238, 0.14);
-  background: linear-gradient(
-    135deg,
-    rgba(245, 243, 238, 0.04) 0%,
-    rgba(232, 93, 42, 0.03) 100%
-  );
-  backface-visibility: visible;
-}
-
-/* Refined custom scrollbar */
-::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
-}
-
-::-webkit-scrollbar-track {
-  background: #0a0a0b;
-}
-
-::-webkit-scrollbar-thumb {
-  background: rgba(245, 243, 238, 0.14);
-  border-radius: 9999px;
-}
-
-::-webkit-scrollbar-thumb:hover {
-  background: rgba(232, 93, 42, 0.45);
-}
-
-.vault-scroll::-webkit-scrollbar {
-  width: 5px;
-  height: 5px;
-}
-
-.vault-scroll::-webkit-scrollbar-track {
-  background: transparent;
-}
-
-.vault-scroll::-webkit-scrollbar-thumb {
-  background: rgba(245, 243, 238, 0.16);
-  border-radius: 9999px;
-}
-
-.no-scrollbar::-webkit-scrollbar {
-  display: none;
-}
-
-.no-scrollbar {
-  -ms-overflow-style: none;
-  scrollbar-width: none;
+textarea.field {
+  padding: 12px 14px;
+  line-height: 1.7;
+  resize: vertical;
 }
 
 @media (prefers-reduced-motion: reduce) {
-  html {
-    scroll-behavior: auto;
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
   }
 }

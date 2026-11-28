@@ -1,4 +1,4 @@
-export function withTimeout(promise, ms = 10000, timeoutCode = "request-timeout") {
+export function withTimeout(promise, ms = 9000, timeoutCode = "request-timeout") {
   let timer;
   const timeoutPromise = new Promise((_, reject) => {
     timer = setTimeout(() => {
@@ -7,229 +7,104 @@ export function withTimeout(promise, ms = 10000, timeoutCode = "request-timeout"
       reject(err);
     }, ms);
   });
-
   return Promise.race([promise, timeoutPromise]).finally(() => clearTimeout(timer));
 }
+
+// Each rule: [test(code, googleMsg, error), arabic title, arabic detail, english title, english detail]
+// Order matters: specific rules first, generic ones last.
+const RULES = [
+  [(c) => c.includes("supabase-missing-env"),
+    "مفاتيح Supabase Storage غير موجودة", "أضف VITE_SUPABASE_URL و VITE_SUPABASE_ANON_KEY داخل ملف .env ثم أعد تشغيل السيرفر.",
+    "Missing Supabase keys", "Add VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY to .env and restart."],
+  [(c) => c === "missing-env" || c.includes("missing-env"),
+    "ملف البيئة (.env) غير مكتمل", "أنشئ ملف .env في جذر المشروع وأضف مفاتيح Firebase و Supabase ثم أعد تشغيل السيرفر.",
+    "Missing .env configuration", "Create a .env file with your Firebase and Supabase keys, then restart the server."],
+  [(c) => c.includes("bucket not found"),
+    "حاوية التخزين غير موجودة في Supabase", "افتح Supabase ← Storage وأنشئ Bucket عاماً باسم codewhiz-vault.",
+    "Supabase bucket not found", "Create a public bucket named codewhiz-vault in Supabase Storage."],
+  [(c) => c.includes("row-level security") || c.includes("violates row-level"),
+    "صلاحيات الرفع في Supabase مرفوضة", "أضف Policy تسمح بـ INSERT و SELECT على الحاوية codewhiz-vault (الكود جاهز في README).",
+    "Supabase storage policy blocked", "Allow INSERT and SELECT on bucket codewhiz-vault (SQL is in the README)."],
+  [(c) => c.includes("payload too large") || /\b413\b/.test(c) || c.includes("maximum allowed size"),
+    "حجم الملف يتجاوز الحد المجاني (50MB)", "الخطة المجانية تسمح بـ 50 ميغابايت للملف. اضغط الملف أو صغّر الصورة.",
+    "File exceeds the 50MB free limit", "Compress the archive or optimise the image."],
+  [(c) => c.includes("configuration-not-found"),
+    "خدمة Authentication غير مفعّلة", "فعّل Email/Password و Google من Firebase ← Authentication ← Sign-in method.",
+    "Authentication not configured", "Enable Email/Password and Google under Authentication → Sign-in method."],
+  [(c) => c.includes("unauthorized-domain"),
+    "النطاق غير مصرّح به", "أضف رابط موقعك في Firebase ← Authentication ← Settings ← Authorized domains.",
+    "Unauthorized domain", "Add your domain under Authentication → Settings → Authorized domains."],
+  [(c) => c.includes("email-already-in-use"),
+    "البريد مسجّل مسبقاً", "استخدم تسجيل الدخول بدلاً من إنشاء حساب جديد.",
+    "Email already registered", "Switch to Sign in instead."],
+  [(c) => c.includes("invalid-credential") || c.includes("wrong-password") || c.includes("user-not-found"),
+    "بيانات الدخول غير صحيحة", "تأكد من البريد وكلمة المرور وحاول مجدداً.",
+    "Invalid credentials", "Check your email and password and try again."],
+  [(c) => c.includes("weak-password"),
+    "كلمة المرور قصيرة", "يجب أن تكون 6 أحرف أو أرقام على الأقل.",
+    "Weak password", "Use at least 6 characters."],
+  [(c) => c.includes("popup-closed-by-user") || c.includes("cancelled-popup-request"),
+    "أُغلقت نافذة Google", "أُغلقت نافذة تسجيل الدخول قبل اكتمال العملية.",
+    "Google sign-in cancelled", "The popup was closed before sign-in finished."],
+  [(c) => c.includes("ai-unauthorized"),
+    "الصياغة بالذكاء الاصطناعي للمشرف فقط", "سجّل الدخول بحساب المشرف (موجود في مجموعة admins) ثم أعد المحاولة.",
+    "AI drafting is admin-only", "Sign in with an account listed in the admins collection and retry."],
+  [(c) => c.includes("gemini-empty-notes"),
+    "الوصف البسيط مطلوب", "اكتب فكرة المشروع في الخانة المخصصة أولاً.",
+    "Rough notes required", "Write your short project notes first."],
+  [(c) => c.includes("gemini-missing-key"),
+    "مفتاح Gemini غير موجود", "أضف GEMINI_API_KEY في إعدادات Vercel (أو VITE_GEMINI_API_KEY محلياً) ثم أعد النشر/التشغيل.",
+    "Gemini API key missing", "Set GEMINI_API_KEY on Vercel (or VITE_GEMINI_API_KEY locally) and redeploy/restart."],
+  [(c, g) => g.includes("location is not supported"),
+    "Gemini غير متاح في موقعك الجغرافي", "انشر المشروع على Vercel ليستخدم مسار /api/describe من خادم مدعوم، أو فعّل VPN أثناء التجربة المحلية.",
+    "Gemini unavailable in your region", "Deploy to Vercel so /api/describe runs from a supported region, or use a VPN locally."],
+  [(c, g) => g.includes("api key not valid") || g.includes("api_key_invalid"),
+    "مفتاح Gemini غير صالح", "انسخ مفتاحاً جديداً من Google AI Studio وتأكد أنه كامل بلا مسافات.",
+    "Invalid Gemini API key", "Copy a fresh key from Google AI Studio."],
+  [(c, g) => g.includes("has not been used in project") || g.includes("is disabled") || g.includes("service_blocked"),
+    "واجهة Generative Language API غير مفعّلة", "أنشئ مفتاحاً جديداً من Google AI Studio أو فعّل الواجهة في Google Cloud.",
+    "Generative Language API disabled", "Create a new key in Google AI Studio or enable the API in Google Cloud."],
+  [(c, g) => c.includes("gemini-429") || g.includes("resource_exhausted") || g.includes("quota"),
+    "تجاوزت حد الطلبات المؤقت", "انتظر نحو 30 ثانية وحاول مجدداً.",
+    "Gemini rate limit reached", "Wait about 30 seconds and retry."],
+  [(c) => c.includes("gemini-blocked"),
+    "رفض Gemini هذا النص", "أعد كتابة الوصف البسيط بصياغة مختلفة وحاول مجدداً.",
+    "Gemini blocked this text", "Rephrase your notes and try again."],
+  [(c) => c.includes("gemini-bad-response"),
+    "ردّ Gemini غير مفهوم", "حاول مرة ثانية، وإن تكرر الأمر اختصر الوصف البسيط.",
+    "Gemini returned an unreadable reply", "Retry, or shorten your notes."],
+  [(c) => c.includes("gemini-network"),
+    "تعذّر الوصول إلى خوادم Gemini", "غالباً حظر شبكة أو إضافة حجب إعلانات. انشر على Vercel لاستخدام المسار الخلفي، أو جرّب VPN.",
+    "Could not reach Gemini", "Likely a network block or ad-blocker. Deploy to Vercel to use the server route, or try a VPN."],
+  [(c) => c.includes("permission-denied") || c.includes("missing or insufficient permissions"),
+    "صلاحيات Firestore مرفوضة", "انشر قواعد الحماية من README وأضف معرّف حسابك (UID) في مجموعة admins.",
+    "Firestore permission denied", "Publish the rules from the README and add your UID to the admins collection."],
+  [(c) => c.includes("request-timeout") || c.includes("unavailable") || c.includes("network-request-failed") || c.includes("offline"),
+    "انتهت مهلة الاتصال", "تأكد من الإنترنت ومن إعدادات Firestore و Supabase.",
+    "Connection timeout", "Check your connection and your Firestore / Supabase settings."],
+];
 
 export function diagnoseError(error, lang = "ar") {
   const code = String(error?.code || error?.message || "").toLowerCase();
   const googleMsg = String(error?.googleMessage || "");
-  const googleMsgLower = googleMsg.toLowerCase();
+  const g = googleMsg.toLowerCase();
   const isAr = lang === "ar";
 
-  if (code.includes("missing-env")) {
-    return {
-      title: isAr ? "ملف البيئة (.env) غير مكتمل" : "Missing .env Configuration",
-      detail: isAr
-        ? "تأكد من إنشاء ملف .env في جذر المشروع وإضافة مفاتيح Firebase و Supabase ثم أعد تشغيل السيرفر."
-        : "Create a .env file in the project root with your Firebase and Supabase keys, then restart the server.",
-    };
+  for (const [test, titleAr, detailAr, titleEn, detailEn] of RULES) {
+    if (test(code, g, error)) {
+      return { title: isAr ? titleAr : titleEn, detail: isAr ? detailAr : detailEn };
+    }
   }
 
-  if (code.includes("supabase-missing-env")) {
+  if (code.startsWith("gemini")) {
     return {
-      title: isAr ? "مفاتيح Supabase Storage غير موجودة" : "Missing Supabase Keys",
-      detail: isAr
-        ? "أضف VITE_SUPABASE_URL و VITE_SUPABASE_ANON_KEY داخل ملف .env ثم أعد تشغيل السيرفر."
-        : "Add VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY to your .env file and restart.",
-    };
-  }
-
-  if (code.includes("bucket not found")) {
-    return {
-      title: isAr ? "حاوية التخزين (Bucket) غير موجودة في Supabase" : "Supabase Bucket Not Found",
-      detail: isAr
-        ? "افتح Supabase -> Storage وأنشئ Bucket عام (Public) باسم codewhiz-vault."
-        : "Open Supabase -> Storage and create a Public bucket named codewhiz-vault.",
-    };
-  }
-
-  if (code.includes("row-level security") || code.includes("violates row-level")) {
-    return {
-      title: isAr ? "صلاحيات الرفع في Supabase Storage مرفوضة" : "Supabase Storage Policy Blocked",
-      detail: isAr
-        ? "افتح Supabase -> Storage -> Policies وأضف سياسة (Policy) تسمح بـ INSERT و SELECT على حاوية codewhiz-vault."
-        : "Open Supabase -> Storage -> Policies and allow INSERT and SELECT on bucket codewhiz-vault.",
-    };
-  }
-
-  if (code.includes("payload too large") || code.includes("413") || code.includes("maximum allowed size")) {
-    return {
-      title: isAr ? "حجم الملف يتجاوز الحد المجاني (50MB)" : "File Exceeds 50MB Free Limit",
-      detail: isAr
-        ? "الخطة المجانية في Supabase تسمح بملفات حتى 50 ميغابايت للملف الواحد. ضغط الملف أو تقليل حجم الصورة سيحل المشكلة."
-        : "Supabase Free Tier supports up to 50MB per file. Compress the archive or optimize the image.",
-    };
-  }
-
-  if (code.includes("configuration-not-found")) {
-    return {
-      title: isAr ? "خدمة Authentication غير مفعّلة" : "Authentication Not Configured",
-      detail: isAr
-        ? "افتح Firebase Console -> Authentication -> Sign-in method وفعّل Email/Password و Google."
-        : "Open Firebase Console -> Authentication -> Sign-in method and enable Email/Password and Google.",
-    };
-  }
-
-  if (code.includes("unauthorized-domain")) {
-    return {
-      title: isAr ? "النطاق غير مصرح به (Unauthorized Domain)" : "Unauthorized Domain",
-      detail: isAr
-        ? "أضف رابط موقعك (مثل دومين Vercel) في Firebase Console -> Authentication -> Settings -> Authorized domains."
-        : "Add your domain (e.g. Vercel URL) under Authentication -> Settings -> Authorized domains.",
-    };
-  }
-
-  if (code.includes("popup-blocked")) {
-    return {
-      title: isAr ? "المتصفح منع نافذة تسجيل الدخول" : "Sign-In Popup Blocked",
-      detail: isAr
-        ? "اسمح بالنوافذ المنبثقة لهذا الموقع أو سجّل الدخول باستخدام البريد الإلكتروني وكلمة المرور."
-        : "Allow popups for this site or sign in using email and password instead.",
-    };
-  }
-
-  if (code.includes("email-already-in-use")) {
-    return {
-      title: isAr ? "البريد الإلكتروني مسجّل مسبقاً" : "Email Already Registered",
-      detail: isAr
-        ? "هذا البريد مستخدم بالفعل. انتقل إلى وضع تسجيل الدخول بدلاً من إنشاء حساب جديد."
-        : "This email is already registered. Switch to Sign In instead.",
-    };
-  }
-
-  if (
-    code.includes("invalid-credential") ||
-    code.includes("wrong-password") ||
-    code.includes("user-not-found")
-  ) {
-    return {
-      title: isAr ? "بيانات الدخول غير صحيحة" : "Invalid Credentials",
-      detail: isAr
-        ? "تأكد من صحة البريد الإلكتروني وكلمة المرور وحاول مرة أخرى."
-        : "Double-check your email and password and try again.",
-    };
-  }
-
-  if (code.includes("weak-password")) {
-    return {
-      title: isAr ? "كلمة المرور قصيرة" : "Weak Password",
-      detail: isAr
-        ? "يجب أن تتكون كلمة المرور من 6 أحرف أو أرقام على الأقل."
-        : "Password must be at least 6 characters long.",
-    };
-  }
-
-  if (code.includes("popup-closed-by-user") || code.includes("cancelled-popup-request")) {
-    return {
-      title: isAr ? "تم إغلاق نافذة Google" : "Google Sign-In Cancelled",
-      detail: isAr
-        ? "تم إغلاق نافذة تسجيل الدخول قبل إتمام العملية."
-        : "The sign-in popup was closed before completing authentication.",
-    };
-  }
-
-  if (code.includes("permission-denied")) {
-    return {
-      title: isAr ? "صلاحيات قاعدة البيانات مرفوضة" : "Firestore Permission Denied",
-      detail: isAr
-        ? "تحقق من تفعيل Firestore Database ونشر قواعد الحماية (Rules) ومنح حسابك دور admin."
-        : "Verify Firestore is enabled, security rules are published, and your user has the admin role.",
-    };
-  }
-
-  // Gemini Specific Diagnostics
-  if (code.includes("gemini-empty-notes")) {
-    return {
-      title: isAr ? "الوصف البسيط مطلوب" : "Rough Description Required",
-      detail: isAr
-        ? "اكتب فكرة المشروع أو الوصف البسيط في الخانة المخصصة أولاً ليتمكن الذكاء الاصطناعي من صياغته."
-        : "Enter your short project notes first so AI can formulate the descriptions.",
-    };
-  }
-
-  if (code.includes("gemini-missing-key")) {
-    return {
-      title: isAr ? "مفتاح Gemini API غير مضبوط" : "Gemini API Key Missing",
-      detail: isAr
-        ? "أضف GEMINI_API_KEY (أو VITE_GEMINI_API_KEY) في إعدادات Vercel أو ملف .env، أو استخدم زر الصياغة الذكية المحلية."
-        : "Add GEMINI_API_KEY (or VITE_GEMINI_API_KEY) in Vercel settings or .env, or use the Smart Local Polish option.",
-    };
-  }
-
-  if (googleMsgLower.includes("location is not supported")) {
-    return {
-      title: isAr ? "منطقة الاتصال غير مدعومة مباشرة من Google" : "Unsupported Region for Direct Gemini API",
-      detail: isAr
-        ? "عند النشر على Vercel سيعمل التوليد تلقائياً عبر خادم الموقع (/api/generate-description) بدون VPN. محلياً فعّل VPN أو استخدم الصياغة الذكية المحلية."
-        : "On Vercel, requests route via /api/generate-description automatically. Locally, enable VPN or use Smart Local Polish.",
-    };
-  }
-
-  if (googleMsgLower.includes("api key not valid") || googleMsgLower.includes("api_key_invalid")) {
-    return {
-      title: isAr ? "مفتاح Gemini API غير صالح" : "Invalid Gemini API Key",
-      detail: isAr
-        ? "المفتاح الموجود غير صحيح أو منسوخ بشكل ناقص. انسخه مجدداً من Google AI Studio."
-        : "The provided Gemini API key is invalid. Copy a fresh key from Google AI Studio.",
-    };
-  }
-
-  if (
-    googleMsgLower.includes("has not been used in project") ||
-    googleMsgLower.includes("is disabled") ||
-    googleMsgLower.includes("service_blocked")
-  ) {
-    return {
-      title: isAr ? "واجهة Generative Language API غير مفعّلة" : "Generative Language API Disabled",
-      detail: isAr
-        ? "فعّل Generative Language API في مشروع Google Cloud المرتبط بالمفتاح أو أنشئ مفتاحاً جديداً من Google AI Studio."
-        : "Enable Generative Language API in Google Cloud Console or create a new key in Google AI Studio.",
-    };
-  }
-
-  if (
-    code.includes("gemini-429") ||
-    googleMsgLower.includes("resource_exhausted") ||
-    googleMsgLower.includes("quota")
-  ) {
-    return {
-      title: isAr ? "تم تجاوز حد الطلبات المؤقت (Rate Limit)" : "Gemini Rate Limit Reached",
-      detail: isAr
-        ? "تم استهلاك الحد المسموح للدقيقة. انتظر 30 ثانية وحاول مجدداً أو استخدم الصياغة المحلية."
-        : "Request quota temporarily exceeded. Wait 30 seconds or use Local Polish.",
-    };
-  }
-
-  if (code.includes("gemini")) {
-    return {
-      title: isAr
-        ? `خطأ من خادم Gemini (${error?.status || "API"})`
-        : `Gemini Server Error (${error?.status || "API"})`,
-      detail:
-        googleMsg ||
-        (isAr
-          ? "تعذّر الحصول على استجابة صالحة من Gemini API. يمكنك استخدام الصياغة الذكية المحلية كبديل فوري."
-          : "Could not receive a valid response from Gemini API. You can use Smart Local Polish instead."),
-    };
-  }
-
-  if (
-    code.includes("request-timeout") ||
-    code.includes("unavailable") ||
-    code.includes("network-request-failed") ||
-    code.includes("offline")
-  ) {
-    return {
-      title: isAr ? "انتهت مهلة الاتصال أو تعذّر الوصول للخادم" : "Connection Timeout / Offline",
-      detail: isAr
-        ? "تأكد من اتصال الإنترنت ومن إعدادات Firestore و Supabase."
-        : "Check your internet connection and verify Firestore and Supabase settings.",
+      title: isAr ? `خطأ من Gemini (${error?.status || "API"})` : `Gemini error (${error?.status || "API"})`,
+      detail: googleMsg || (isAr ? "تعذّر الحصول على ردّ صالح." : "No valid response received."),
     };
   }
 
   return {
-    title: isAr ? "حدث خطأ غير متوقع" : "Unexpected Error",
-    detail: error?.message || (isAr ? "يرجى المحاولة مرة أخرى." : "Please try again."),
+    title: isAr ? "حدث خطأ غير متوقع" : "Unexpected error",
+    detail: error?.message || (isAr ? "حاول مرة أخرى." : "Please try again."),
   };
 }

@@ -1,48 +1,74 @@
-# codewhiz.1 — Source Code Vault (v2.0)
+# codewhiz.1 — خزنة الأكواد
 
-Official source archive & project showcase for **@codewhiz.1**, designed and built by **Yazed Al-Ashkar**.
+أرشيف مشاريع @codewhiz.1 (تصميم وتطوير يازد الأشقر). Firebase للحسابات والبيانات، Supabase للملفات، Gemini لصياغة الأوصاف.
 
-## What's New in v2.0
-- **Reliable AI Description Generator**: Routes through `/api/generate-description` (Vercel Serverless Function) to bypass regional geo-blocks, with multi-model fallback (`gemini-2.5-flash`, `gemini-2.0-flash`, `gemini-2.0-flash-lite`, `gemini-1.5-flash`), structured JSON output, tone selector, and an offline Smart Local Polish backup.
-- **Editorial Studio Design + Scroll-Driven 3D Sculptures**: Warm-obsidian & ivory designer aesthetic with GPU-accelerated 3D geometric sculptures (`ScrollSculptures.jsx`) driven by mouse scroll & pointer parallax.
-- **Mobile-First Experience**: Natural smooth scrolling, safe-area aware floating bottom dock, bottom-sheet modals, and a React Portal floating toast system (`ToastProvider.jsx`) so notifications always appear reliably on mobile.
-- **Auto-Resetting Monthly Visitors Counter**: Tracks unique monthly visits in Firestore (`analytics/visitors_YYYY-MM`), automatically resetting to 0 on the 1st of every calendar month.
-- **Pro Features**: Bookmarks ("Saved"), `Ctrl+K` Command Palette, direct project deep-links (`?project=<id>`), download counter & sorting, project editing, live file previews, and 2-step delete confirmation in `/vault-admin`.
+## التشغيل
+```bash
+npm install
+cp .env.example .env   # املأ المفاتيح
+npm run dev
+```
 
-## Setup Checklist
+## ⚠️ قواعد Firestore (مهم: تغيّرت)
+النسخة القديمة كانت تسمح لأي مستخدم بمنح نفسه صلاحية admin، ورمز الأمان كان ظاهراً داخل ملفات الموقع. الآن المشرف يُحدَّد بوجود وثيقة في مجموعة `admins` لا يستطيع أحد الكتابة فيها من المتصفح.
 
-1. **Install dependencies:**
-   ```bash
-   npm install
-   ```
+الصق هذه القواعد في Firestore → Rules ثم Publish:
+```javascript
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function isAdmin() {
+      return request.auth != null &&
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid));
+    }
 
-2. **Configure `.env` (and Vercel Environment Variables):**
-   Copy `.env.example` to `.env` and fill in your Firebase, Supabase, and Gemini keys.
-   > On **Vercel**, add `GEMINI_API_KEY` (or `VITE_GEMINI_API_KEY`) in Project Settings -> Environment Variables so `/api/generate-description` runs server-side without geo-restrictions.
+    match /projects/{id} {
+      allow read: if true;
+      allow create, update, delete: if isAdmin();
+      // أي زائر يستطيع زيادة عدّاد التحميل فقط
+      allow update: if request.resource.data.diff(resource.data).affectedKeys().hasOnly(['downloads'])
+        && request.resource.data.downloads == resource.data.downloads + 1;
+    }
 
-3. **Firebase Console (Firestore Rules):**
-   Update your Firestore rules to include the `analytics` collection for the monthly-resetting visitor counter:
-   ```javascript
-   rules_version = '2';
-   service cloud.firestore {
-     match /databases/{database}/documents {
-       match /projects/{projectId} {
-         allow read: if true;
-         allow update: if request.resource.data.diff(resource.data).affectedKeys().hasOnly(['downloads']);
-         allow create, update, delete: if request.auth != null &&
-           exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
-           get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == "admin";
-       }
-       match /users/{userId} {
-         allow read: if request.auth != null;
-         allow create, update: if request.auth != null && request.auth.uid == userId;
-       }
-       match /analytics/{docId} {
-         allow read, create, update: if docId.matches('visitors_[0-9]{4}-[0-9]{2}');
-       }
-     }
-   }
-   ```
+    match /users/{uid} {
+      allow read: if request.auth != null && request.auth.uid == uid;
+      allow create: if request.auth != null && request.auth.uid == uid
+        && request.resource.data.role == 'member';
+      allow update: if request.auth != null && request.auth.uid == uid
+        && request.resource.data.role == resource.data.role;
+    }
 
-4. **Run & Deploy:**
-   Run `npm run dev` locally or deploy to **Vercel**. Open `/vault-admin` to manage and publish projects.
+    match /admins/{uid} {
+      allow read: if request.auth != null && request.auth.uid == uid;
+      allow write: if false;
+    }
+  }
+}
+```
+
+### تفعيل حسابك كمشرف (مرة واحدة)
+1. افتح `/vault-admin` وسجّل الدخول، سيعرض لك الـ UID.
+2. Firebase Console ← Firestore ← أنشئ مجموعة `admins` ← وثيقة معرّفها هو الـ UID.
+3. اضغط «إعادة الفحص».
+
+## Supabase Storage
+```sql
+insert into storage.buckets (id, name, public)
+values ('codewhiz-vault', 'codewhiz-vault', true)
+on conflict (id) do nothing;
+
+drop policy if exists "Allow public access to codewhiz-vault" on storage.objects;
+create policy "Allow public access to codewhiz-vault"
+on storage.objects for all to public
+using (bucket_id = 'codewhiz-vault')
+with check (bucket_id = 'codewhiz-vault');
+```
+
+## الذكاء الاصطناعي (Gemini)
+- على **Vercel**: أضف `GEMINI_API_KEY` في Environment Variables ثم أعد النشر. الصياغة تمر عبر `/api/describe` من خادم Vercel، فتعمل حتى لو كانت Google تحجب Gemini في بلدك، ويبقى المفتاح سرياً، والمسار مقفل على المشرفين فقط.
+- محلياً (`npm run dev`): ضع `VITE_GEMINI_API_KEY` في `.env`. الاتصال مباشر من المتصفح وقد يحتاج VPN في بعض الدول.
+- النظام يكتشف النماذج المتاحة لمفتاحك تلقائياً ويجرّب بديلاً عند فشل أي نموذج. إذا فشل كل شيء يضع مسودة محلية بسيطة (مُعلَّمة بأنها ليست AI) بدل ترك الحقول فارغة.
+- اختصار: `Ctrl/⌘ + Enter` داخل خانة الفكرة يبدأ الصياغة.
+
+## النشر على Vercel
+متغيرات البيئة: كل متغيرات `VITE_FIREBASE_*` و `VITE_SUPABASE_*` + `GEMINI_API_KEY`. أضف نطاق Vercel إلى Firebase ← Authentication ← Authorized domains.

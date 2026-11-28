@@ -13,6 +13,8 @@ import {
   doc,
   setDoc,
   getDoc,
+  updateDoc,
+  increment,
   serverTimestamp,
 } from "firebase/firestore";
 import { withTimeout } from "./diagnostics";
@@ -79,7 +81,7 @@ export async function loginWithGoogle() {
   return res.user;
 }
 
-export async function registerWithEmail({ email, password, username, isAdmin = false }) {
+export async function registerWithEmail({ email, password, username }) {
   assertReady();
   const normalizedUsername = username
     .trim()
@@ -102,39 +104,13 @@ export async function registerWithEmail({ email, password, username, isAdmin = f
       email: email.trim(),
       username: normalizedUsername,
       displayName: normalizedUsername,
-      role: isAdmin ? "admin" : "member",
+      role: "member",
       createdAt: serverTimestamp(),
     }),
     8000
   );
 
   return res.user;
-}
-
-export async function grantAdminRoleWithSecret(user, username = "admin") {
-  assertReady();
-  if (!user) throw new Error("يرجى تسجيل الدخول أولاً");
-
-  const normalizedUsername =
-    username.trim().toLowerCase().replace(/[^a-z0-9_.]/g, "") ||
-    user.email?.split("@")[0] ||
-    "admin";
-
-  await withTimeout(
-    setDoc(
-      doc(db, "users", user.uid),
-      {
-        uid: user.uid,
-        email: user.email,
-        username: normalizedUsername,
-        displayName: user.displayName || normalizedUsername,
-        role: "admin",
-        updatedAt: serverTimestamp(),
-      },
-      { merge: true }
-    ),
-    8000
-  );
 }
 
 export async function loginWithEmail(email, password) {
@@ -149,4 +125,28 @@ export async function loginWithEmail(email, password) {
 export async function logoutUser() {
   if (!auth) return;
   await signOut(auth);
+}
+
+export async function getIdToken() {
+  try {
+    return auth?.currentUser ? await auth.currentUser.getIdToken() : "";
+  } catch {
+    return "";
+  }
+}
+
+// Admin status lives in /admins/{uid}; clients can read their own doc but never write it (see README rules).
+export async function checkIsAdmin(uid) {
+  assertReady();
+  const snap = await withTimeout(getDoc(doc(db, "admins", uid)), 8000);
+  return snap.exists();
+}
+
+export async function bumpDownloads(projectId) {
+  if (!db) return;
+  try {
+    await updateDoc(doc(db, "projects", projectId), { downloads: increment(1) });
+  } catch {
+    /* counter is best-effort */
+  }
 }

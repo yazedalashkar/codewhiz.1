@@ -1,1168 +1,538 @@
-import { useState, useEffect, useCallback, useRef, useMemo } from "react";
-import { motion } from "framer-motion";
+import { useState, useEffect, useCallback, useRef } from "react";
+import { motion, AnimatePresence } from "framer-motion";
 import {
-  Lock,
-  Upload,
-  Wand2,
-  Trash2,
-  FileArchive,
-  Image as ImageIcon,
-  Instagram,
-  ArrowLeft,
-  Star,
-  CheckCircle2,
-  Loader2,
-  AlertCircle,
-  RefreshCw,
-  KeyRound,
-  LogOut,
-  Pencil,
-  X,
-  Users,
-  Download,
-  Layers,
-  Sparkles,
+  Lock, Upload, Wand2, Trash2, FileArchive, Image as ImageIcon, Instagram, ArrowRight, Star,
+  CheckCircle2, Loader2, AlertCircle, AlertTriangle, RefreshCw, LogOut, Copy, Check, Pencil, X, Eye,
 } from "lucide-react";
 import {
-  collection,
-  addDoc,
-  deleteDoc,
-  doc,
-  onSnapshot,
-  orderBy,
-  query,
-  serverTimestamp,
-  getDoc,
-  updateDoc,
+  collection, addDoc, deleteDoc, doc, onSnapshot, orderBy, query, serverTimestamp, updateDoc,
 } from "firebase/firestore";
 import { Link } from "react-router-dom";
 import {
-  auth,
-  db,
-  isFirebaseConfigured,
-  loginWithEmail,
-  registerWithEmail,
-  grantAdminRoleWithSecret,
-  logoutUser,
+  auth, db, isFirebaseConfigured, loginWithEmail, loginWithGoogle, registerWithEmail, logoutUser, checkIsAdmin,
 } from "../lib/firebase";
 import { uploadToSupabase, isSupabaseConfigured } from "../lib/supabase";
-import {
-  generateBilingualDescription,
-  generateLocalFallbackDescription,
-} from "../lib/gemini";
+import { generateProjectCopy, localDraft } from "../lib/gemini";
 import { diagnoseError, withTimeout } from "../lib/diagnostics";
-import {
-  subscribeMonthlyVisitors,
-  formatMonthLabel,
-  getDaysRemainingInMonth,
-} from "../lib/analytics";
-import { useToast } from "../components/ToastProvider";
+import { formatSize } from "../lib/format";
 
-const STUDIO_EASE = [0.22, 1, 0.36, 1];
-const MAX_SUPABASE_BYTES = 50 * 1024 * 1024; // 50MB
+const EASE = [0.22, 1, 0.36, 1];
+const DRAFT_KEY = "cw-admin-draft";
+const MAX_BYTES = 50 * 1024 * 1024;
+const TONES = [
+  { id: "technical", label: "تقني" },
+  { id: "concise", label: "مختصر" },
+  { id: "friendly", label: "مبسّط" },
+];
+const VIA_LABEL = {
+  server: "صيغ عبر الخادم",
+  browser: "صيغ مباشرة من المتصفح",
+  local: "مسودة محلية بدون ذكاء اصطناعي",
+};
 
-function formatMB(bytes) {
-  return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+const emptyForm = { title: "", tags: "", instaUrl: "", rawNotes: "", descAr: "", descEn: "", featured: false };
+
+function Notice({ n, onClose }) {
+  if (!n) return null;
+  const styles = {
+    error: ["bg-flare/15 border-flare/40", AlertCircle, "text-flare"],
+    warn: ["bg-sun/15 border-sun/40", AlertTriangle, "text-sun"],
+    success: ["bg-iris/20 border-iris/50", CheckCircle2, "text-iris"],
+  }[n.type || "error"];
+  const Icon = styles[1];
+  return (
+    <div role="alert" className={`p-3.5 rounded-2xl border-2 text-sm flex items-start gap-3 ${styles[0]}`}>
+      <Icon className={`w-5 h-5 shrink-0 mt-0.5 ${styles[2]}`} />
+      <div className="flex-1 space-y-1">
+        <p className="font-semibold">{n.title}</p>
+        {n.detail && <p className="text-bone/75 leading-6">{n.detail}</p>}
+      </div>
+      {onClose && (
+        <button type="button" onClick={onClose} aria-label="إغلاق" className="h-8 w-8 -m-1 flex items-center justify-center text-bone/50">
+          <X className="w-4 h-4" />
+        </button>
+      )}
+    </div>
+  );
+}
+
+function DropZone({ icon: Icon, label, accept, file, preview, onFile, disabled }) {
+  const [over, setOver] = useState(false);
+  return (
+    <label
+      onDragOver={(e) => { e.preventDefault(); setOver(true); }}
+      onDragLeave={() => setOver(false)}
+      onDrop={(e) => { e.preventDefault(); setOver(false); const f = e.dataTransfer.files?.[0]; if (f && !disabled) onFile(f); }}
+      className={`relative min-h-[112px] rounded-2xl border-2 border-dashed flex flex-col items-center justify-center gap-2 text-center px-3 py-4 cursor-pointer overflow-hidden transition-colors ${
+        over ? "border-sun bg-sun/10" : file ? "border-iris/60 bg-iris/10" : "border-haze bg-ink"
+      }`}
+    >
+      {preview && <img src={preview} alt="" className="absolute inset-0 w-full h-full object-cover opacity-35" />}
+      <Icon className="w-6 h-6 text-bone/80 relative" />
+      <span className="relative text-sm text-bone/80 break-all line-clamp-2">{file ? file.name : label}</span>
+      {file && <span className="relative text-xs text-bone/50 tabular-nums">{formatSize(file.size)}</span>}
+      <input type="file" accept={accept} disabled={disabled} className="hidden" onChange={(e) => onFile(e.target.files?.[0] || null)} />
+    </label>
+  );
 }
 
 export default function AdminVault() {
-  const toast = useToast();
-
   const [user, setUser] = useState(null);
   const [isAdmin, setIsAdmin] = useState(false);
-  const [checkingAuth, setCheckingAuth] = useState(true);
-  const [checkStatusText, setCheckStatusText] = useState("جاري التحقق من الجلسة...");
-
-  // Auth / Upgrade States
+  const [checking, setChecking] = useState(true);
   const [authMode, setAuthMode] = useState("login");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [username, setUsername] = useState("yazedalashkar");
-  const [secretCode, setSecretCode] = useState("");
-  const [authSubmitting, setAuthSubmitting] = useState(false);
-  const [upgradingRole, setUpgradingRole] = useState(false);
-  const [authDiagnostic, setAuthDiagnostic] = useState(null);
+  const [username, setUsername] = useState("");
+  const [authBusy, setAuthBusy] = useState("");
+  const [authDiag, setAuthDiag] = useState(null);
+  const [uidCopied, setUidCopied] = useState(false);
 
-  // Project Form States
-  const [editingId, setEditingId] = useState(null);
-  const [title, setTitle] = useState("");
-  const [tags, setTags] = useState("Python, ASCII, CLI");
-  const [rawNotes, setRawNotes] = useState("");
-  const [aiTone, setAiTone] = useState("technical");
-  const [instaUrl, setInstaUrl] = useState("");
-  const [descAr, setDescAr] = useState("");
-  const [descEn, setDescEn] = useState("");
-  const [featured, setFeatured] = useState(false);
+  const [form, setForm] = useState(emptyForm);
+  const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.type === "checkbox" ? e.target.checked : e.target.value }));
   const [imageFile, setImageFile] = useState(null);
-  const [imagePreviewUrl, setImagePreviewUrl] = useState("");
   const [zipFile, setZipFile] = useState(null);
+  const [imagePreview, setImagePreview] = useState("");
+  const [editing, setEditing] = useState(null);
 
-  const imageInputRef = useRef(null);
-  const zipInputRef = useRef(null);
-
-  // Action Loading & Status States
-  const [aiLoading, setAiLoading] = useState(false);
-  const [publishingStep, setPublishingStep] = useState("");
-  const [formNotice, setFormNotice] = useState(null);
+  const [tone, setTone] = useState("technical");
+  const [aiBusy, setAiBusy] = useState(false);
+  const [aiMeta, setAiMeta] = useState(null);
+  const [suggest, setSuggest] = useState(null);
+  const [step, setStep] = useState("");
+  const [notice, setNotice] = useState(null);
   const [projects, setProjects] = useState([]);
   const [loadingProjects, setLoadingProjects] = useState(true);
-  const [busyProjectId, setBusyProjectId] = useState("");
-  const [confirmDeleteId, setConfirmDeleteId] = useState("");
+  const [busyId, setBusyId] = useState("");
+  const formTop = useRef(null);
 
-  // Monthly Visitors Telemetry
-  const [visitorStats, setVisitorStats] = useState({
-    count: 0,
-    monthKey: "",
-    loading: true,
-  });
-
-  useEffect(() => {
-    const unsub = subscribeMonthlyVisitors(setVisitorStats);
-    return () => unsub();
-  }, []);
-
-  // Create/revoke object URL for local image preview
-  useEffect(() => {
-    if (!imageFile) return;
-    const objectUrl = URL.createObjectURL(imageFile);
-    setImagePreviewUrl(objectUrl);
-    return () => URL.revokeObjectURL(objectUrl);
-  }, [imageFile]);
-
-  const verifyUserRole = useCallback(async (u) => {
-    if (!u || !db) {
-      setIsAdmin(false);
-      setCheckingAuth(false);
-      return;
-    }
-
-    setCheckingAuth(true);
-    setCheckStatusText("جاري فحص صلاحيات المشرف في قاعدة البيانات...");
-
+  /* ---- admin gate: /admins/{uid} (clients can read their own doc, never write it) ---- */
+  const verify = useCallback(async (u) => {
+    if (!u) { setIsAdmin(false); setChecking(false); return; }
+    setChecking(true);
     try {
-      let snap = await withTimeout(getDoc(doc(db, "users", u.uid)), 8000);
-      if (!snap.exists()) {
-        setCheckStatusText("جاري مزامنة سجل الحساب...");
-        await new Promise((r) => setTimeout(r, 900));
-        snap = await withTimeout(getDoc(doc(db, "users", u.uid)), 8000);
-      }
-      setIsAdmin(snap.exists() && snap.data().role === "admin");
-      setAuthDiagnostic(null);
+      setIsAdmin(await checkIsAdmin(u.uid));
+      setAuthDiag(null);
     } catch (err) {
-      setAuthDiagnostic(diagnoseError(err, "ar"));
+      setAuthDiag(diagnoseError(err, "ar"));
       setIsAdmin(false);
     } finally {
-      setCheckingAuth(false);
+      setChecking(false);
     }
   }, []);
 
   useEffect(() => {
     if (!isFirebaseConfigured || !auth || !db) {
-      setAuthDiagnostic(diagnoseError({ code: "missing-env" }, "ar"));
-      setCheckingAuth(false);
+      setAuthDiag(diagnoseError({ code: "missing-env" }, "ar"));
+      setChecking(false);
       return;
     }
-
-    const unsub = auth.onAuthStateChanged((u) => {
-      setUser(u);
-      if (u) {
-        verifyUserRole(u);
-      } else {
-        setIsAdmin(false);
-        setCheckingAuth(false);
-      }
-    });
-
-    return () => unsub();
-  }, [verifyUserRole]);
+    return auth.onAuthStateChanged((u) => { setUser(u); verify(u); });
+  }, [verify]);
 
   useEffect(() => {
     if (!isAdmin || !db) return;
     setLoadingProjects(true);
-    const q = query(collection(db, "projects"), orderBy("createdAt", "desc"));
     return onSnapshot(
-      q,
-      (snap) => {
-        setProjects(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
-        setLoadingProjects(false);
-      },
-      (err) => {
-        const info = diagnoseError(err, "ar");
-        setFormNotice({ type: "error", ...info });
-        toast.error(info.title, info.detail);
-        setLoadingProjects(false);
-      }
+      query(collection(db, "projects"), orderBy("createdAt", "desc")),
+      (snap) => { setProjects(snap.docs.map((d) => ({ id: d.id, ...d.data() }))); setLoadingProjects(false); },
+      (err) => { setNotice({ type: "error", ...diagnoseError(err, "ar") }); setLoadingProjects(false); }
     );
-  }, [isAdmin, toast]);
+  }, [isAdmin]);
 
-  const resetForm = useCallback(() => {
-    setEditingId(null);
-    setTitle("");
-    setTags("Python, ASCII, CLI");
-    setRawNotes("");
-    setInstaUrl("");
-    setDescAr("");
-    setDescEn("");
-    setFeatured(false);
-    setImageFile(null);
-    setImagePreviewUrl("");
-    setZipFile(null);
-    if (imageInputRef.current) imageInputRef.current.value = "";
-    if (zipInputRef.current) zipInputRef.current.value = "";
-  }, []);
-
-  const handleAdminAuth = async (e) => {
-    e.preventDefault();
-    setAuthDiagnostic(null);
-    setAuthSubmitting(true);
+  /* ---- draft autosave (survives refresh / accidental close) ---- */
+  useEffect(() => {
+    if (!isAdmin) return;
     try {
-      if (authMode === "register") {
-        if (secretCode.trim() !== import.meta.env.VITE_ADMIN_SECRET_CODE) {
-          throw new Error("رمز الأمان الإداري غير مطابق للقيمة في ملف .env");
-        }
-        await registerWithEmail({ email, password, username, isAdmin: true });
-        toast.success("تم إنشاء حساب المشرف بنجاح");
+      const saved = JSON.parse(localStorage.getItem(DRAFT_KEY) || "null");
+      if (saved) setForm({ ...emptyForm, ...saved });
+    } catch { /* storage blocked */ }
+  }, [isAdmin]);
+  useEffect(() => {
+    if (!isAdmin || editing) return;
+    try { localStorage.setItem(DRAFT_KEY, JSON.stringify(form)); } catch { /* ignore */ }
+  }, [form, isAdmin, editing]);
+
+  useEffect(() => {
+    if (!imageFile) { setImagePreview(""); return; }
+    const url = URL.createObjectURL(imageFile);
+    setImagePreview(url);
+    return () => URL.revokeObjectURL(url);
+  }, [imageFile]);
+
+  /* ---- auth handlers ---- */
+  const runAuth = async (kind, fn) => {
+    setAuthDiag(null);
+    setAuthBusy(kind);
+    try { await fn(); } catch (err) { setAuthDiag(diagnoseError(err, "ar")); } finally { setAuthBusy(""); }
+  };
+  const submitAuth = (e) => {
+    e.preventDefault();
+    runAuth("email", () => (authMode === "register" ? registerWithEmail({ email, password, username }) : loginWithEmail(email, password)));
+  };
+  const copyUid = async () => {
+    try { await navigator.clipboard.writeText(user.uid); setUidCopied(true); setTimeout(() => setUidCopied(false), 1800); } catch { /* ignore */ }
+  };
+
+  /* ---- AI drafting ---- */
+  const generate = async () => {
+    if (!form.rawNotes.trim()) {
+      setNotice({ type: "error", ...diagnoseError({ code: "gemini-empty-notes" }, "ar") });
+      return;
+    }
+    setAiBusy(true);
+    setNotice(null);
+    setSuggest(null);
+    try {
+      const res = await generateProjectCopy({ rawNotes: form.rawNotes, tags: form.tags, title: form.title, tone });
+      setForm((f) => ({ ...f, descAr: res.ar, descEn: res.en }));
+      setAiMeta({ via: res.via, model: res.model });
+      if ((res.title && res.title !== form.title) || res.tags?.length) setSuggest({ title: res.title, tags: res.tags || [] });
+      setNotice({ type: "success", title: "تمت الصياغة", detail: "راجع النصين وعدّلهما قبل النشر." });
+    } catch (err) {
+      const d = diagnoseError(err, "ar");
+      const draft = localDraft({ rawNotes: form.rawNotes, tags: form.tags });
+      setForm((f) => ({ ...f, descAr: draft.ar, descEn: draft.en }));
+      setAiMeta({ via: "local" });
+      setNotice({ type: "warn", title: d.title, detail: `${d.detail} وُضعت مسودة محلية بسيطة (ليست من الذكاء الاصطناعي) لتعدّلها يدوياً.` });
+    } finally {
+      setAiBusy(false);
+    }
+  };
+
+  const mergeTags = (extra) => {
+    const cur = form.tags.split(",").map((t) => t.trim()).filter(Boolean);
+    const lower = new Set(cur.map((t) => t.toLowerCase()));
+    setForm((f) => ({ ...f, tags: [...cur, ...extra.filter((t) => !lower.has(t.toLowerCase()))].join(", ") }));
+  };
+
+  /* ---- publish / update ---- */
+  const resetForm = () => {
+    setForm(emptyForm); setImageFile(null); setZipFile(null); setEditing(null); setAiMeta(null); setSuggest(null);
+    try { localStorage.removeItem(DRAFT_KEY); } catch { /* ignore */ }
+  };
+
+  const publish = async (e) => {
+    e.preventDefault();
+    if (!isSupabaseConfigured && (imageFile || zipFile || !editing)) {
+      setNotice({ type: "error", ...diagnoseError({ code: "supabase-missing-env" }, "ar") });
+      return;
+    }
+    if (!editing && (!imageFile || !zipFile)) {
+      setNotice({ type: "error", title: "ملفات ناقصة", detail: "أرفق الصورة التوضيحية وملف الكود المضغوط معاً." });
+      return;
+    }
+    if (zipFile && zipFile.size > MAX_BYTES) {
+      setNotice({ type: "error", ...diagnoseError({ code: "payload too large" }, "ar") });
+      return;
+    }
+    setNotice(null);
+    try {
+      const data = {
+        title: form.title.trim(),
+        tags: form.tags.split(",").map((t) => t.trim()).filter(Boolean),
+        description_ar: form.descAr.trim(),
+        description_en: form.descEn.trim(),
+        instaUrl: form.instaUrl.trim(),
+        featured: form.featured,
+      };
+      if (imageFile) { setStep("image"); data.imageUrl = await uploadToSupabase("previews", imageFile); }
+      if (zipFile) { setStep("zip"); data.zipUrl = await uploadToSupabase("zips", zipFile); data.zipSize = zipFile.size; }
+
+      setStep("saving");
+      if (editing) {
+        await withTimeout(updateDoc(doc(db, "projects", editing), { ...data, updatedAt: serverTimestamp() }), 10000);
       } else {
-        await loginWithEmail(email, password);
-        toast.success("تم تسجيل الدخول");
+        await withTimeout(addDoc(collection(db, "projects"), { ...data, downloads: 0, createdAt: serverTimestamp() }), 10000);
       }
-    } catch (err) {
-      const info = diagnoseError(err, "ar");
-      setAuthDiagnostic(info);
-      toast.error(info.title, info.detail);
-    } finally {
-      setAuthSubmitting(false);
-    }
-  };
-
-  const handleUpgradeCurrentUser = async (e) => {
-    e.preventDefault();
-    setAuthDiagnostic(null);
-    setUpgradingRole(true);
-    try {
-      if (secretCode.trim() !== import.meta.env.VITE_ADMIN_SECRET_CODE) {
-        throw new Error("رمز الأمان الإداري غير صحيح");
-      }
-      await grantAdminRoleWithSecret(user, username);
-      await verifyUserRole(user);
-      toast.success("تم تفعيل صلاحيات المشرف");
-    } catch (err) {
-      const info = diagnoseError(err, "ar");
-      setAuthDiagnostic(info);
-      toast.error(info.title, info.detail);
-    } finally {
-      setUpgradingRole(false);
-    }
-  };
-
-  const handleGenerateAI = async () => {
-    if (!rawNotes.trim()) {
-      const msg = {
-        title: "الوصف البسيط مطلوب",
-        detail:
-          "اكتب فكرة المشروع أو الوصف البسيط أولاً ليتمكن الذكاء الاصطناعي من صياغته.",
-      };
-      setFormNotice({ type: "error", ...msg });
-      toast.warning(msg.title, msg.detail);
-      return;
-    }
-
-    setAiLoading(true);
-    setFormNotice(null);
-    try {
-      const res = await generateBilingualDescription({
-        rawNotes,
-        tags,
-        title,
-        tone: aiTone,
-      });
-      setDescAr(res.ar);
-      setDescEn(res.en);
-      const okMsg = {
-        title: "تم توليد الوصف بنجاح",
-        detail:
-          res.via === "server"
-            ? `تمت الصياغة عبر خادم الموقع (${res.model}). يمكنك مراجعتها قبل النشر.`
-            : `تمت الصياغة عبر (${res.model}). يمكنك مراجعة النصين قبل النشر.`,
-      };
-      setFormNotice({ type: "success", ...okMsg });
-      toast.success(okMsg.title, okMsg.detail);
-    } catch (err) {
-      const info = diagnoseError(err, "ar");
-      setFormNotice({ type: "error", ...info });
-      toast.error(info.title, info.detail);
-    } finally {
-      setAiLoading(false);
-    }
-  };
-
-  const handleLocalPolish = () => {
-    if (!rawNotes.trim()) {
-      toast.warning(
-        "الوصف البسيط مطلوب",
-        "اكتب فكرة المشروع أولاً ليتم تنسيقها تلقائياً."
-      );
-      return;
-    }
-    const res = generateLocalFallbackDescription({ rawNotes, tags, title });
-    setDescAr(res.ar);
-    setDescEn(res.en);
-    const msg = {
-      title: "تمت الصياغة الذكية المحلية",
-      detail: "تم تنسيق الوصف بالعربية والإنكليزية محلياً بدون الحاجة لاتصال API.",
-    };
-    setFormNotice({ type: "success", ...msg });
-    toast.success(msg.title, msg.detail);
-  };
-
-  const handleStartEdit = (project) => {
-    setEditingId(project.id);
-    setTitle(project.title || "");
-    setTags((project.tags || []).join(", "));
-    setInstaUrl(project.instaUrl || "");
-    setDescAr(project.description_ar || "");
-    setDescEn(project.description_en || "");
-    setFeatured(Boolean(project.featured));
-    setImageFile(null);
-    setZipFile(null);
-    setImagePreviewUrl(project.imageUrl || "");
-    setFormNotice(null);
-    window.scrollTo({ top: 0, behavior: "smooth" });
-    toast.info("وضع تعديل المشروع", project.title);
-  };
-
-  const handlePublish = async (e) => {
-    e.preventDefault();
-
-    if (!editingId && !isSupabaseConfigured) {
-      const info = diagnoseError({ code: "supabase-missing-env" }, "ar");
-      setFormNotice({ type: "error", ...info });
-      toast.error(info.title, info.detail);
-      return;
-    }
-
-    if (!editingId && (!imageFile || !zipFile)) {
-      const msg = {
-        title: "ملفات ناقصة",
-        detail: "يرجى إرفاق الصورة التوضيحية وملف الكود المضغوط (.zip) معاً.",
-      };
-      setFormNotice({ type: "error", ...msg });
-      toast.warning(msg.title, msg.detail);
-      return;
-    }
-
-    if (imageFile && imageFile.size > MAX_SUPABASE_BYTES) {
-      toast.error("حجم الصورة كبير جداً", "الحد الأقصى للملف الواحد هو 50MB.");
-      return;
-    }
-
-    if (zipFile && zipFile.size > MAX_SUPABASE_BYTES) {
-      toast.error("حجم ملف ZIP كبير جداً", "الحد الأقصى للملف الواحد هو 50MB.");
-      return;
-    }
-
-    let normalizedInsta = instaUrl.trim();
-    if (normalizedInsta && !/^https?:\/\//i.test(normalizedInsta)) {
-      normalizedInsta = `https://${normalizedInsta}`;
-    }
-
-    setFormNotice(null);
-    try {
-      const existingProject = editingId
-        ? projects.find((p) => p.id === editingId)
-        : null;
-
-      let imageUrl = existingProject?.imageUrl || "";
-      let zipUrl = existingProject?.zipUrl || "";
-
-      if (imageFile) {
-        setPublishingStep("image");
-        imageUrl = await uploadToSupabase("previews", imageFile);
-      }
-
-      if (zipFile) {
-        setPublishingStep("zip");
-        zipUrl = await uploadToSupabase("zips", zipFile);
-      }
-
-      setPublishingStep("saving");
-      const payload = {
-        title: title.trim(),
-        tags: tags
-          .split(",")
-          .map((t) => t.trim())
-          .filter(Boolean),
-        description_ar: descAr.trim(),
-        description_en: descEn.trim(),
-        instaUrl: normalizedInsta,
-        imageUrl,
-        zipUrl,
-        featured,
-      };
-
-      if (editingId) {
-        await withTimeout(
-          updateDoc(doc(db, "projects", editingId), {
-            ...payload,
-            updatedAt: serverTimestamp(),
-          }),
-          10000
-        );
-        const msg = {
-          title: "تم تحديث المشروع بنجاح",
-          detail: "تم حفظ التعديلات وتحديث المشروع في الواجهة الرئيسية.",
-        };
-        setFormNotice({ type: "success", ...msg });
-        toast.success(msg.title, msg.detail);
-      } else {
-        await withTimeout(
-          addDoc(collection(db, "projects"), {
-            ...payload,
-            downloads: 0,
-            createdAt: serverTimestamp(),
-          }),
-          10000
-        );
-        const msg = {
-          title: "تم نشر المشروع بنجاح",
-          detail: "تم رفع الملفات إلى Supabase Storage ونشر المشروع في الواجهة الرئيسية.",
-        };
-        setFormNotice({ type: "success", ...msg });
-        toast.success(msg.title, msg.detail);
-      }
-
+      const wasEditing = Boolean(editing);
       resetForm();
+      setNotice({ type: "success", title: wasEditing ? "تم تحديث المشروع" : "تم نشر المشروع", detail: "التغيير ظاهر الآن في الواجهة الرئيسية." });
     } catch (err) {
-      const info = diagnoseError(err, "ar");
-      setFormNotice({ type: "error", ...info });
-      toast.error(info.title, info.detail);
+      setNotice({ type: "error", ...diagnoseError(err, "ar") });
     } finally {
-      setPublishingStep("");
+      setStep("");
     }
   };
 
-  const handleToggleFeatured = async (project) => {
-    setBusyProjectId(project.id);
-    try {
-      await updateDoc(doc(db, "projects", project.id), {
-        featured: !project.featured,
-      });
-      toast.success(
-        !project.featured ? "تم تمييز المشروع" : "تم إلغاء التمييز",
-        project.title
-      );
-    } catch (err) {
-      const info = diagnoseError(err, "ar");
-      setFormNotice({ type: "error", ...info });
-      toast.error(info.title, info.detail);
-    } finally {
-      setBusyProjectId("");
-    }
+  const startEdit = (p) => {
+    setEditing(p.id);
+    setForm({
+      title: p.title || "", tags: (p.tags || []).join(", "), instaUrl: p.instaUrl || "", rawNotes: "",
+      descAr: p.description_ar || "", descEn: p.description_en || "", featured: Boolean(p.featured),
+    });
+    setImageFile(null); setZipFile(null); setAiMeta(null); setSuggest(null); setNotice(null);
+    formTop.current?.scrollIntoView({ behavior: "smooth", block: "start" });
   };
 
-  const handleDeleteProject = async (project) => {
-    if (confirmDeleteId !== project.id) {
-      setConfirmDeleteId(project.id);
-      toast.warning("تأكيد الحذف", `اضغط زر الحذف مرة أخرى لحذف "${project.title}"`);
-      setTimeout(() => {
-        setConfirmDeleteId((curr) => (curr === project.id ? "" : curr));
-      }, 4500);
-      return;
-    }
-
-    setBusyProjectId(project.id);
-    setConfirmDeleteId("");
-    try {
-      await deleteDoc(doc(db, "projects", project.id));
-      if (editingId === project.id) resetForm();
-      toast.success("تم حذف المشروع", project.title);
-    } catch (err) {
-      const info = diagnoseError(err, "ar");
-      setFormNotice({ type: "error", ...info });
-      toast.error(info.title, info.detail);
-    } finally {
-      setBusyProjectId("");
-    }
+  const toggleFeatured = async (p) => {
+    setBusyId(p.id);
+    try { await updateDoc(doc(db, "projects", p.id), { featured: !p.featured }); }
+    catch (err) { setNotice({ type: "error", ...diagnoseError(err, "ar") }); }
+    finally { setBusyId(""); }
+  };
+  const remove = async (p) => {
+    if (!window.confirm(`حذف «${p.title}» نهائياً؟`)) return;
+    setBusyId(p.id);
+    try { await deleteDoc(doc(db, "projects", p.id)); if (editing === p.id) resetForm(); }
+    catch (err) { setNotice({ type: "error", ...diagnoseError(err, "ar") }); }
+    finally { setBusyId(""); }
   };
 
-  const getPublishLabel = () => {
-    if (publishingStep === "image") return "1/3 جاري رفع الصورة...";
-    if (publishingStep === "zip") return "2/3 جاري رفع ملف الـ ZIP...";
-    if (publishingStep === "saving") return "3/3 جاري الحفظ...";
-    return editingId ? "حفظ التعديلات" : "نشر المشروع";
-  };
+  const publishing = Boolean(step);
+  const publishLabel = { image: "1/3 رفع الصورة…", zip: "2/3 رفع ملف ZIP…", saving: "3/3 حفظ البيانات…" }[step] || (editing ? "حفظ التعديلات" : "نشر المشروع");
 
-  const totalDownloads = useMemo(
-    () => projects.reduce((sum, p) => sum + (Number(p.downloads) || 0), 0),
-    [projects]
-  );
-  const featuredCount = useMemo(
-    () => projects.filter((p) => p.featured).length,
-    [projects]
-  );
-  const monthLabel = useMemo(
-    () => (visitorStats.monthKey ? formatMonthLabel(visitorStats.monthKey, "ar") : ""),
-    [visitorStats.monthKey]
-  );
-  const daysLeft = useMemo(() => getDaysRemainingInMonth(), []);
+  /* ================= screens ================= */
+  const shell = "min-h-dvh bg-ink text-bone";
 
-  if (checkingAuth) {
+  if (checking) {
     return (
-      <div
-        className="min-h-dvh bg-[#0A0A0B] studio-grid text-[#F5F3EE] flex flex-col items-center justify-center gap-3 p-4"
-        dir="rtl"
-      >
-        <Loader2 className="w-6 h-6 text-[#E85D2A] animate-spin" />
-        <p className="text-xs text-[#9B9A97]">{checkStatusText}</p>
+      <div dir="rtl" className={`${shell} flex flex-col items-center justify-center gap-3`}>
+        <Loader2 className="w-7 h-7 animate-spin text-flare" />
+        <p className="text-sm text-bone/60">جاري التحقق من الجلسة…</p>
       </div>
     );
   }
 
   if (!user || !isAdmin) {
     return (
-      <div
-        className="min-h-dvh bg-[#0A0A0B] studio-grid text-[#F5F3EE] flex items-center justify-center p-4"
-        dir="rtl"
-      >
+      <div dir="rtl" className={`${shell} flex items-center justify-center p-4 py-10`}>
         <motion.div
-          initial={{ opacity: 0, y: 14 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.35, ease: STUDIO_EASE }}
-          className="w-full max-w-sm rounded-3xl bg-[#111113] border border-white/10 p-6 shadow-2xl space-y-4"
+          initial={{ opacity: 0, y: 24 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.5, ease: EASE }}
+          className="w-full max-w-sm rounded-[28px] bg-plum border-2 border-haze p-6 space-y-5"
         >
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-xl bg-[#18181B] border border-[#E85D2A]/40 flex items-center justify-center">
-                <Lock className="w-4 h-4 text-[#E85D2A]" />
-              </div>
+              <span className="h-12 w-12 rounded-2xl bg-flare text-ink flex items-center justify-center rotate-[-6deg]"><Lock className="w-5 h-5" /></span>
               <div>
-                <h1 className="font-bold text-base text-[#F5F3EE]">إدارة المحتوى</h1>
-                <p className="text-[11px] text-[#8A8780] font-mono">codewhiz.1</p>
+                <h1 className="font-display text-2xl leading-none">لوحة النشر</h1>
+                <p className="text-xs text-bone/50 mt-1">codewhiz.1</p>
               </div>
             </div>
             {user && (
-              <button
-                type="button"
-                onClick={() => verifyUserRole(user)}
-                title="إعادة فحص الصلاحيات"
-                className="p-2 rounded-lg bg-white/[0.05] hover:bg-white/[0.1] border border-white/[0.08] text-[#9B9A97] hover:text-[#F5F3EE] transition-colors"
-              >
-                <RefreshCw className="w-3.5 h-3.5" />
+              <button onClick={() => verify(user)} aria-label="إعادة الفحص" className="h-11 w-11 rounded-full bg-ink flex items-center justify-center text-bone/70 active:scale-95">
+                <RefreshCw className="w-4 h-4" />
               </button>
             )}
           </div>
 
-          {user && !isAdmin ? (
-            <form onSubmit={handleUpgradeCurrentUser} className="space-y-3">
-              <div className="p-3.5 rounded-2xl bg-black/45 border border-white/[0.07] space-y-1">
-                <p className="text-xs font-semibold text-[#F5F3EE]">
-                  أنت مسجّل الدخول حالياً بـ:
-                </p>
-                <p className="text-[11px] font-mono text-[#F59E6C] truncate">
-                  {user.email}
-                </p>
-                <p className="text-[11px] text-[#9B9A97] leading-relaxed pt-1">
-                  هذا الحساب لا يملك سجل مشرف في Firestore بعد. أدخل رمز الأمان لتفعيل صلاحياتك فوراً:
-                </p>
+          {user ? (
+            <div className="space-y-4">
+              <div className="p-4 rounded-2xl bg-ink space-y-2">
+                <p className="text-sm font-semibold">هذا الحساب ليس مشرفاً بعد</p>
+                <p className="text-xs text-bone/60 break-all">{user.email}</p>
+                <ol className="text-xs text-bone/75 leading-6 list-decimal ps-5 space-y-1 pt-1">
+                  <li>انسخ المعرّف (UID) بالأسفل.</li>
+                  <li>في Firebase Console ← Firestore أنشئ مجموعة <b>admins</b>.</li>
+                  <li>أضف وثيقة معرّفها هو الـ UID نفسه (الحقول فارغة تكفي).</li>
+                  <li>ارجع هنا واضغط زر إعادة الفحص.</li>
+                </ol>
               </div>
-
-              <input
-                type="text"
-                required
-                placeholder="اسم المستخدم (Username)"
-                value={username}
-                onChange={(e) => setUsername(e.target.value)}
-                className="w-full h-11 px-3.5 rounded-xl bg-black/50 border border-white/[0.08] focus:border-[#E85D2A]/60 outline-none text-xs font-mono"
-              />
-
-              <div className="relative">
-                <KeyRound className="w-3.5 h-3.5 text-[#787671] absolute top-3.5 start-3.5" />
-                <input
-                  type="password"
-                  required
-                  placeholder="رمز الأمان الإداري"
-                  value={secretCode}
-                  onChange={(e) => setSecretCode(e.target.value)}
-                  className="w-full h-11 ps-9 pe-3.5 rounded-xl bg-black/50 border border-white/[0.08] focus:border-[#E85D2A]/60 outline-none text-xs font-mono"
-                />
-              </div>
-
-              {authDiagnostic && (
-                <div className="p-3 rounded-xl bg-rose-500/10 border border-rose-500/25 text-rose-200 space-y-1">
-                  <div className="flex items-center gap-1.5 text-[11px] font-semibold">
-                    <AlertCircle className="w-3.5 h-3.5 text-rose-400 shrink-0" />
-                    <span>{authDiagnostic.title}</span>
-                  </div>
-                  <p className="text-[11px] text-rose-300/90 leading-relaxed">
-                    {authDiagnostic.detail}
-                  </p>
-                </div>
-              )}
-
-              <button
-                type="submit"
-                disabled={upgradingRole}
-                className="w-full h-11 rounded-xl bg-[#E85D2A] hover:bg-[#F06835] text-[#0A0A0B] font-semibold text-xs flex items-center justify-center gap-2 transition-colors disabled:opacity-60"
-              >
-                {upgradingRole && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
-                <span>
-                  {upgradingRole ? "جاري تفعيل الصلاحيات..." : "تفعيل صلاحية المشرف"}
-                </span>
+              <button onClick={copyUid} className="w-full h-12 rounded-2xl bg-ink border-2 border-haze font-mono text-xs flex items-center justify-between px-4 active:scale-[0.98]">
+                <span className="truncate" dir="ltr">{user.uid}</span>
+                {uidCopied ? <Check className="w-4 h-4 text-sun shrink-0" /> : <Copy className="w-4 h-4 shrink-0" />}
               </button>
-
-              <button
-                type="button"
-                onClick={logoutUser}
-                className="w-full h-10 rounded-xl bg-white/[0.04] hover:bg-white/[0.08] border border-white/[0.08] text-[#9B9A97] text-xs flex items-center justify-center gap-1.5 transition-colors"
-              >
-                <LogOut className="w-3.5 h-3.5" />
-                <span>تسجيل الخروج واستخدام بريد آخر</span>
+              {authDiag && <Notice n={{ type: "error", ...authDiag }} />}
+              <button onClick={logoutUser} className="w-full h-11 rounded-2xl text-sm text-bone/60 flex items-center justify-center gap-2">
+                <LogOut className="w-4 h-4" /> تسجيل الخروج واستخدام حساب آخر
               </button>
-            </form>
+            </div>
           ) : (
-            <form onSubmit={handleAdminAuth} className="space-y-3">
+            <form onSubmit={submitAuth} className="space-y-3">
+              <button type="button" onClick={() => runAuth("google", loginWithGoogle)} disabled={Boolean(authBusy)}
+                className="w-full h-12 rounded-2xl bg-bone text-ink font-semibold text-sm flex items-center justify-center gap-2 disabled:opacity-60">
+                {authBusy === "google" && <Loader2 className="w-4 h-4 animate-spin" />} المتابعة مع Google
+              </button>
+              <div className="flex items-center gap-3 text-xs text-bone/40"><span className="h-px flex-1 bg-haze" />أو<span className="h-px flex-1 bg-haze" /></div>
               {authMode === "register" && (
-                <>
-                  <input
-                    type="text"
-                    required
-                    disabled={authSubmitting}
-                    placeholder="اسم المستخدم (Username)"
-                    value={username}
-                    onChange={(e) => setUsername(e.target.value)}
-                    className="w-full h-11 px-3.5 rounded-xl bg-black/50 border border-white/[0.08] text-xs font-mono disabled:opacity-50"
-                  />
-                  <input
-                    type="password"
-                    required
-                    disabled={authSubmitting}
-                    placeholder="رمز الأمان الإداري"
-                    value={secretCode}
-                    onChange={(e) => setSecretCode(e.target.value)}
-                    className="w-full h-11 px-3.5 rounded-xl bg-black/50 border border-white/[0.08] text-xs font-mono disabled:opacity-50"
-                  />
-                </>
+                <input className="field" dir="ltr" required placeholder="اسم المستخدم (إنكليزي)" value={username} onChange={(e) => setUsername(e.target.value)} />
               )}
-
-              <input
-                type="email"
-                required
-                disabled={authSubmitting}
-                placeholder="البريد الإلكتروني"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                className="w-full h-11 px-3.5 rounded-xl bg-black/50 border border-white/[0.08] text-xs disabled:opacity-50"
-              />
-              <input
-                type="password"
-                required
-                disabled={authSubmitting}
-                placeholder="كلمة المرور"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                className="w-full h-11 px-3.5 rounded-xl bg-black/50 border border-white/[0.08] text-xs disabled:opacity-50"
-              />
-
-              {authDiagnostic && (
-                <div className="p-3 rounded-xl bg-rose-500/10 border border-rose-500/25 text-rose-200 space-y-1">
-                  <div className="flex items-center gap-1.5 text-[11px] font-semibold">
-                    <AlertCircle className="w-3.5 h-3.5 text-rose-400 shrink-0" />
-                    <span>{authDiagnostic.title}</span>
-                  </div>
-                  <p className="text-[11px] text-rose-300/90 leading-relaxed">
-                    {authDiagnostic.detail}
-                  </p>
-                </div>
-              )}
-
-              <button
-                type="submit"
-                disabled={authSubmitting}
-                className="w-full h-11 rounded-xl bg-[#F5F3EE] hover:bg-white text-[#0A0A0B] font-semibold text-xs flex items-center justify-center gap-2 transition-colors disabled:opacity-60"
-              >
-                {authSubmitting && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
-                <span>
-                  {authSubmitting
-                    ? "جاري التحقق..."
-                    : authMode === "login"
-                    ? "تسجيل الدخول"
-                    : "إنشاء حساب المشرف"}
-                </span>
+              <input className="field" dir="ltr" type="email" required autoComplete="email" placeholder="البريد الإلكتروني" value={email} onChange={(e) => setEmail(e.target.value)} />
+              <input className="field" dir="ltr" type="password" required minLength={6} autoComplete={authMode === "login" ? "current-password" : "new-password"} placeholder="كلمة المرور" value={password} onChange={(e) => setPassword(e.target.value)} />
+              {authDiag && <Notice n={{ type: "error", ...authDiag }} />}
+              <button type="submit" disabled={Boolean(authBusy)} className="w-full h-12 rounded-2xl bg-flare text-ink font-semibold flex items-center justify-center gap-2 disabled:opacity-60">
+                {authBusy === "email" && <Loader2 className="w-4 h-4 animate-spin" />}
+                {authMode === "login" ? "تسجيل الدخول" : "إنشاء حساب"}
+              </button>
+              <button type="button" onClick={() => { setAuthDiag(null); setAuthMode(authMode === "login" ? "register" : "login"); }} className="w-full h-10 text-sm text-bone/60">
+                {authMode === "login" ? "حساب جديد" : "لدي حساب"}
               </button>
             </form>
           )}
 
-          <div className="pt-3 border-t border-white/[0.08] flex items-center justify-between text-xs text-[#9B9A97]">
-            {!user ? (
-              <button
-                type="button"
-                onClick={() => {
-                  setAuthDiagnostic(null);
-                  setAuthMode(authMode === "login" ? "register" : "login");
-                }}
-                className="hover:text-[#F5F3EE] transition-colors"
-              >
-                {authMode === "login" ? "إنشاء حساب مشرف" : "تسجيل الدخول"}
-              </button>
-            ) : (
-              <span className="text-[11px] font-mono text-[#787671]">
-                uid: {user.uid.slice(0, 6)}...
-              </span>
-            )}
-            <Link to="/" className="hover:text-[#F5F3EE] flex items-center gap-1">
-              <ArrowLeft className="w-3.5 h-3.5" /> الواجهة الرئيسية
-            </Link>
-          </div>
+          <Link to="/" className="flex items-center justify-center gap-2 text-sm text-bone/60 pt-3 border-t-2 border-haze h-12">
+            <ArrowRight className="w-4 h-4" /> الواجهة الرئيسية
+          </Link>
         </motion.div>
       </div>
     );
   }
 
-  const isPublishing = Boolean(publishingStep);
-
   return (
-    <div className="min-h-dvh bg-[#0A0A0B] studio-grid text-[#F5F3EE] flex flex-col" dir="rtl">
-      <header className="sticky top-0 z-30 h-14 px-4 sm:px-6 border-b border-white/[0.08] bg-[#111113]/90 backdrop-blur-xl flex items-center justify-between">
-        <div className="flex items-center gap-2.5 min-w-0">
-          <span className="w-2 h-2 rounded-full bg-[#E85D2A] shrink-0" />
-          <span className="font-mono font-semibold text-sm text-[#F5F3EE] truncate">
-            codewhiz.1
-          </span>
-          <span className="text-[#5A5854]">/</span>
-          <span className="text-xs text-[#9B9A97] truncate">لوحة الإدارة</span>
-        </div>
-        <div className="flex items-center gap-2 shrink-0">
-          <Link
-            to="/"
-            className="h-9 px-3 rounded-xl bg-white/[0.05] hover:bg-white/[0.1] border border-white/[0.08] text-xs font-medium text-[#D6D3CD] flex items-center gap-1.5 transition-colors"
-          >
-            <ArrowLeft className="w-3.5 h-3.5" />
-            <span>معاينة الموقع</span>
-          </Link>
-          <button
-            type="button"
-            onClick={logoutUser}
-            title="تسجيل الخروج"
-            className="w-9 h-9 rounded-xl bg-white/[0.05] hover:bg-white/[0.1] border border-white/[0.08] text-[#9B9A97] hover:text-[#F5F3EE] flex items-center justify-center transition-colors"
-          >
-            <LogOut className="w-3.5 h-3.5" />
-          </button>
+    <div dir="rtl" className={shell}>
+      <header className="sticky top-0 z-30 bg-plum/95 backdrop-blur-md border-b-2 border-haze pt-[env(safe-area-inset-top)]">
+        <div className="max-w-6xl mx-auto h-14 px-4 md:px-6 flex items-center justify-between">
+          <div className="flex items-center gap-2.5">
+            <span className="h-8 w-8 rounded-lg bg-flare text-ink font-mono font-bold text-xs flex items-center justify-center rotate-[-6deg]">cw</span>
+            <span className="font-display text-lg">لوحة النشر</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <Link to="/" className="h-10 px-4 rounded-full bg-ink text-sm flex items-center gap-2 active:scale-95"><Eye className="w-4 h-4" /><span className="hidden sm:inline">معاينة الموقع</span></Link>
+            <button onClick={logoutUser} aria-label="خروج" className="h-10 w-10 rounded-full bg-ink flex items-center justify-center text-bone/70 active:scale-95"><LogOut className="w-4 h-4" /></button>
+          </div>
         </div>
       </header>
 
-      <div className="flex-1 max-w-7xl w-full mx-auto p-4 sm:p-6 space-y-5 pb-12">
-        {/* Admin Live Analytics Strip */}
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-          <div className="p-4 rounded-2xl bg-[#111113] border border-white/[0.08]">
-            <div className="flex items-center justify-between text-[11px] text-[#8A8780]">
-              <span className="flex items-center gap-1.5">
-                <Users className="w-3.5 h-3.5 text-emerald-400" />
-                زوار الشهر ({monthLabel.split(" ")[0]})
-              </span>
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-            </div>
-            <p className="text-2xl font-mono font-bold text-[#F5F3EE] tabular-nums mt-1.5">
-              {visitorStats.loading ? "..." : visitorStats.count.toLocaleString()}
-            </p>
-            <p className="text-[10px] font-mono text-[#787671] mt-0.5">
-              يتصفر تلقائياً بعد {daysLeft} يوم
-            </p>
-          </div>
-
-          <div className="p-4 rounded-2xl bg-[#111113] border border-white/[0.08]">
-            <span className="text-[11px] text-[#8A8780] flex items-center gap-1.5">
-              <Layers className="w-3.5 h-3.5 text-[#E85D2A]" />
-              إجمالي المشاريع
-            </span>
-            <p className="text-2xl font-mono font-bold text-[#F5F3EE] tabular-nums mt-1.5">
-              {loadingProjects ? "..." : projects.length}
-            </p>
-            <p className="text-[10px] font-mono text-[#787671] mt-0.5">
-              منشور في الأرشيف
-            </p>
-          </div>
-
-          <div className="p-4 rounded-2xl bg-[#111113] border border-white/[0.08]">
-            <span className="text-[11px] text-[#8A8780] flex items-center gap-1.5">
-              <Star className="w-3.5 h-3.5 text-amber-400" />
-              المختارات
-            </span>
-            <p className="text-2xl font-mono font-bold text-[#F5F3EE] tabular-nums mt-1.5">
-              {loadingProjects ? "..." : featuredCount}
-            </p>
-            <p className="text-[10px] font-mono text-[#787671] mt-0.5">
-              مشاريع مميزة
-            </p>
-          </div>
-
-          <div className="p-4 rounded-2xl bg-[#111113] border border-white/[0.08]">
-            <span className="text-[11px] text-[#8A8780] flex items-center gap-1.5">
-              <Download className="w-3.5 h-3.5 text-[#E85D2A]" />
-              إجمالي التحميلات
-            </span>
-            <p className="text-2xl font-mono font-bold text-[#F5F3EE] tabular-nums mt-1.5">
-              {loadingProjects ? "..." : totalDownloads.toLocaleString()}
-            </p>
-            <p className="text-[10px] font-mono text-[#787671] mt-0.5">
-              ملفات ZIP محمّلة
-            </p>
-          </div>
-        </div>
-
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
-          {/* Publish / Edit Project Form */}
-          <form
-            onSubmit={handlePublish}
-            className="lg:col-span-7 rounded-3xl bg-[#111113] border border-white/[0.08] p-5 sm:p-6 space-y-4"
-          >
-            <div className="flex items-center justify-between gap-2">
-              <div className="flex items-center gap-2">
-                <h2 className="font-bold text-sm sm:text-base text-[#F5F3EE]">
-                  {editingId ? "تعديل مشروع منشور" : "إضافة مشروع جديد"}
-                </h2>
-                {editingId && (
-                  <button
-                    type="button"
-                    onClick={resetForm}
-                    className="px-2.5 py-1 rounded-lg bg-white/[0.05] hover:bg-white/[0.1] text-[11px] text-[#D6D3CD] flex items-center gap-1"
-                  >
-                    <X className="w-3 h-3" /> إلغاء التعديل
-                  </button>
-                )}
-              </div>
-              <span className="text-[11px] font-mono text-[#787671]">
-                Supabase Storage
-              </span>
-            </div>
-
-            {!isSupabaseConfigured && (
-              <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/25 text-amber-200 text-xs flex items-start gap-2">
-                <AlertCircle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
-                <span>
-                  مفاتيح <b>VITE_SUPABASE_URL</b> و <b>VITE_SUPABASE_ANON_KEY</b> غير
-                  مضافة في ملف <code>.env</code> بعد.
-                </span>
-              </div>
-            )}
-
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              <input
-                type="text"
-                required
-                disabled={isPublishing}
-                placeholder="عنوان المشروع"
-                value={title}
-                onChange={(e) => setTitle(e.target.value)}
-                className="h-11 px-3.5 rounded-xl bg-black/50 border border-white/[0.08] focus:border-[#E85D2A]/60 outline-none text-xs disabled:opacity-50"
-              />
-              <input
-                type="text"
-                disabled={isPublishing}
-                placeholder="التقنيات (Python, ASCII, React)"
-                value={tags}
-                onChange={(e) => setTags(e.target.value)}
-                className="h-11 px-3.5 rounded-xl bg-black/50 border border-white/[0.08] focus:border-[#E85D2A]/60 outline-none text-xs font-mono disabled:opacity-50"
-              />
-            </div>
-
-            <div className="relative">
-              <Instagram className="w-4 h-4 text-[#787671] absolute top-3.5 start-3.5" />
-              <input
-                type="text"
-                disabled={isPublishing}
-                placeholder="رابط فيديو الريلز على إنستغرام (اختياري)"
-                value={instaUrl}
-                onChange={(e) => setInstaUrl(e.target.value)}
-                className="w-full h-11 ps-10 pe-3.5 rounded-xl bg-black/50 border border-white/[0.08] focus:border-[#E85D2A]/60 outline-none text-xs font-mono disabled:opacity-50"
-              />
-            </div>
-
-            {/* Upgraded Bilingual AI Description Studio */}
-            <div className="p-4 rounded-2xl bg-black/45 border border-white/[0.08] space-y-3">
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
-                <div className="space-y-0.5">
-                  <span className="text-xs font-semibold text-[#F5F3EE] block">
-                    صياغة الوصف بالذكاء الاصطناعي (عربي + إنكليزي)
-                  </span>
-                  <span className="text-[10px] text-[#8A8780]">
-                    يمر تلقائياً عبر خادم Vercel لتجاوز الحظر الجغرافي، مع بديل محلي فوري.
-                  </span>
-                </div>
-
-                <div className="flex items-center gap-1.5 flex-wrap">
-                  <select
-                    value={aiTone}
-                    onChange={(e) => setAiTone(e.target.value)}
-                    disabled={aiLoading || isPublishing}
-                    className="h-9 px-2.5 rounded-lg bg-[#18181B] border border-white/10 text-[11px] text-[#D6D3CD] outline-none"
-                  >
-                    <option value="technical">أسلوب تقني احترافي</option>
-                    <option value="concise">مختصر جداً (جملة واحدة)</option>
-                  </select>
-
-                  <button
-                    type="button"
-                    onClick={handleGenerateAI}
-                    disabled={aiLoading || isPublishing}
-                    className="h-9 px-3.5 rounded-lg bg-[#E85D2A] hover:bg-[#F06835] text-[#0A0A0B] font-semibold text-xs flex items-center gap-1.5 transition-colors disabled:opacity-50"
-                  >
-                    {aiLoading ? (
-                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                    ) : (
-                      <Wand2 className="w-3.5 h-3.5" />
-                    )}
-                    <span>{aiLoading ? "جاري التوليد..." : "توليد بالـ AI"}</span>
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={handleLocalPolish}
-                    disabled={aiLoading || isPublishing}
-                    title="صياغة فورية بدون إنترنت أو API"
-                    className="h-9 px-3 rounded-lg bg-white/[0.05] hover:bg-white/[0.1] border border-white/10 text-[#D6D3CD] text-xs flex items-center gap-1.5 transition-colors disabled:opacity-50"
-                  >
-                    <Sparkles className="w-3.5 h-3.5 text-[#E85D2A]" />
-                    <span>صياغة محلية</span>
-                  </button>
-                </div>
-              </div>
-
-              <textarea
-                rows={2}
-                disabled={aiLoading || isPublishing}
-                placeholder="اكتب هنا شرحاً بسيطاً لما يفعله الكود ليقوم الذكاء الاصطناعي بصياغته بالعربي والإنكليزي..."
-                value={rawNotes}
-                onChange={(e) => setRawNotes(e.target.value)}
-                className="w-full p-3 rounded-xl bg-[#111113] border border-white/[0.08] focus:border-[#E85D2A]/60 outline-none text-xs leading-relaxed disabled:opacity-50"
-              />
-
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
-                <textarea
-                  rows={3}
-                  required
-                  disabled={aiLoading || isPublishing}
-                  placeholder="الوصف النهائي بالعربي..."
-                  value={descAr}
-                  onChange={(e) => setDescAr(e.target.value)}
-                  className="p-3 rounded-xl bg-[#111113] border border-white/[0.08] focus:border-[#E85D2A]/60 outline-none text-xs leading-relaxed disabled:opacity-50"
-                />
-                <textarea
-                  rows={3}
-                  required
-                  dir="ltr"
-                  disabled={aiLoading || isPublishing}
-                  placeholder="Final English description..."
-                  value={descEn}
-                  onChange={(e) => setDescEn(e.target.value)}
-                  className="p-3 rounded-xl bg-[#111113] border border-white/[0.08] focus:border-[#E85D2A]/60 outline-none text-xs leading-relaxed disabled:opacity-50"
-                />
-              </div>
-            </div>
-
-            {/* File Pickers with Preview & Size Info */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              <label className="min-h-[92px] p-3 rounded-2xl border border-dashed border-white/15 hover:border-[#E85D2A]/60 bg-black/35 flex items-center justify-center cursor-pointer text-xs text-[#9B9A97] gap-3 transition-colors">
-                {imagePreviewUrl ? (
-                  <img
-                    src={imagePreviewUrl}
-                    alt="Preview"
-                    className="w-14 h-14 rounded-xl object-cover border border-white/10 shrink-0"
-                  />
-                ) : (
-                  <ImageIcon className="w-5 h-5 text-[#D6D3CD] shrink-0" />
-                )}
-                <div className="min-w-0 text-start">
-                  <p className="truncate font-medium text-[#F5F3EE]">
-                    {imageFile
-                      ? imageFile.name
-                      : editingId
-                      ? "تغيير الصورة (اختياري)"
-                      : "إرفاق صورة توضيحية"}
-                  </p>
-                  <p className="text-[10px] font-mono text-[#787671] mt-0.5">
-                    {imageFile ? formatMB(imageFile.size) : "PNG, JPG, WebP"}
-                  </p>
-                </div>
-                <input
-                  ref={imageInputRef}
-                  type="file"
-                  accept="image/*"
-                  disabled={isPublishing}
-                  className="hidden"
-                  onChange={(e) => setImageFile(e.target.files?.[0] || null)}
-                />
-              </label>
-
-              <label className="min-h-[92px] p-3 rounded-2xl border border-dashed border-white/15 hover:border-[#E85D2A]/60 bg-black/35 flex items-center justify-center cursor-pointer text-xs text-[#9B9A97] gap-3 transition-colors">
-                <FileArchive className="w-5 h-5 text-[#E85D2A] shrink-0" />
-                <div className="min-w-0 text-start">
-                  <p className="truncate font-medium text-[#F5F3EE]">
-                    {zipFile
-                      ? zipFile.name
-                      : editingId
-                      ? "تغيير ملف ZIP (اختياري)"
-                      : "إرفاق ملف الكود (.ZIP)"}
-                  </p>
-                  <p className="text-[10px] font-mono text-[#787671] mt-0.5">
-                    {zipFile ? formatMB(zipFile.size) : "حتى 50MB"}
-                  </p>
-                </div>
-                <input
-                  ref={zipInputRef}
-                  type="file"
-                  accept=".zip,.rar,.7z"
-                  disabled={isPublishing}
-                  className="hidden"
-                  onChange={(e) => setZipFile(e.target.files?.[0] || null)}
-                />
-              </label>
-            </div>
-
-            {formNotice && (
-              <div
-                className={`p-3 rounded-xl border text-xs space-y-1 ${
-                  formNotice.type === "error"
-                    ? "bg-rose-500/10 border-rose-500/25 text-rose-200"
-                    : "bg-emerald-500/10 border-emerald-500/25 text-emerald-200"
-                }`}
-              >
-                <div className="flex items-center gap-1.5 font-semibold">
-                  {formNotice.type === "error" ? (
-                    <AlertCircle className="w-4 h-4 text-rose-400 shrink-0" />
-                  ) : (
-                    <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
-                  )}
-                  <span>{formNotice.title}</span>
-                </div>
-                <p className="text-[11px] opacity-90 leading-relaxed">
-                  {formNotice.detail}
-                </p>
-              </div>
-            )}
-
-            <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3 pt-1">
-              <label className="flex items-center gap-2 text-xs text-[#D6D3CD] cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={featured}
-                  disabled={isPublishing}
-                  onChange={(e) => setFeatured(e.target.checked)}
-                  className="w-4 h-4 rounded border-white/20 bg-black/50 accent-[#E85D2A]"
-                />
-                <span>تمييز المشروع في تبويب المختارات</span>
-              </label>
-
-              <button
-                type="submit"
-                disabled={isPublishing}
-                className="px-6 h-11 rounded-xl bg-[#F5F3EE] hover:bg-white text-[#0A0A0B] font-semibold text-xs flex items-center justify-center gap-2 transition-colors disabled:opacity-60"
-              >
-                {isPublishing ? (
-                  <Loader2 className="w-4 h-4 animate-spin" />
-                ) : (
-                  <Upload className="w-4 h-4" />
-                )}
-                <span>{getPublishLabel()}</span>
+      <div className="max-w-6xl mx-auto grid lg:grid-cols-12 gap-5 p-4 md:p-6 pb-32 lg:pb-10">
+        {/* FORM */}
+        <form ref={formTop} onSubmit={publish} className="lg:col-span-7 rounded-[28px] bg-plum border-2 border-haze p-5 md:p-6 space-y-5 h-fit scroll-mt-20">
+          <div className="flex items-center justify-between gap-3">
+            <h2 className="font-display text-2xl">{editing ? "تعديل مشروع" : "مشروع جديد"}</h2>
+            {(editing || form.title || form.descAr) && (
+              <button type="button" onClick={resetForm} className="h-9 px-3 rounded-full bg-ink text-xs text-bone/70 active:scale-95">
+                {editing ? "إلغاء التعديل" : "تفريغ النموذج"}
               </button>
-            </div>
-          </form>
+            )}
+          </div>
 
-          {/* Published Projects Manager */}
-          <div className="lg:col-span-5 rounded-3xl bg-[#111113] border border-white/[0.08] p-5 sm:p-6 flex flex-col">
-            <div className="flex items-center justify-between mb-4">
-              <h2 className="font-bold text-sm sm:text-base text-[#F5F3EE]">
-                المشاريع المنشورة
-              </h2>
-              <span className="text-xs font-mono text-[#787671] tabular-nums">
-                {loadingProjects ? "..." : projects.length}
-              </span>
+          {!isSupabaseConfigured && (
+            <Notice n={{ type: "warn", title: "مفاتيح Supabase غير مضافة", detail: "أضف VITE_SUPABASE_URL و VITE_SUPABASE_ANON_KEY في .env." }} />
+          )}
+
+          <div className="grid md:grid-cols-2 gap-3">
+            <input className="field" required disabled={publishing} placeholder="عنوان المشروع" value={form.title} onChange={set("title")} />
+            <input className="field" dir="ltr" disabled={publishing} placeholder="Python, CLI, React" value={form.tags} onChange={set("tags")} />
+          </div>
+          <div className="relative">
+            <Instagram className="w-4 h-4 text-bone/40 absolute top-1/2 -translate-y-1/2 start-4 pointer-events-none" />
+            <input className="field ps-11" dir="ltr" type="url" disabled={publishing} placeholder="رابط الريلز على إنستغرام (اختياري)" value={form.instaUrl} onChange={set("instaUrl")} />
+          </div>
+
+          {/* AI drafting */}
+          <div className="p-4 rounded-2xl bg-ink space-y-3.5">
+            <div className="flex items-center justify-between gap-3 flex-wrap">
+              <p className="text-sm font-semibold">اكتب فكرتك بسرعة وسأصيغها بلغتين</p>
+              <div className="flex gap-1 p-1 rounded-full bg-plum" role="radiogroup" aria-label="نبرة الصياغة">
+                {TONES.map((t) => (
+                  <button key={t.id} type="button" role="radio" aria-checked={tone === t.id} onClick={() => setTone(t.id)}
+                    className={`h-8 px-3.5 rounded-full text-xs font-medium transition-colors ${tone === t.id ? "bg-sun text-ink" : "text-bone/65"}`}>
+                    {t.label}
+                  </button>
+                ))}
+              </div>
             </div>
 
-            <div className="space-y-2.5 max-h-[68vh] overflow-y-auto vault-scroll pe-1">
-              {loadingProjects ? (
-                <div className="py-12 flex flex-col items-center justify-center gap-2 text-[#8A8780]">
-                  <Loader2 className="w-5 h-5 animate-spin text-[#E85D2A]" />
-                  <span className="text-xs">جاري تحميل المشاريع...</span>
-                </div>
-              ) : projects.length === 0 ? (
-                <p className="text-xs text-[#787671] py-10 text-center">
-                  لم يتم نشر أي مشروع بعد
-                </p>
-              ) : (
-                projects.map((p) => {
-                  const isItemBusy = busyProjectId === p.id;
-                  const isConfirmingDelete = confirmDeleteId === p.id;
-                  return (
-                    <div
-                      key={p.id}
-                      className={`p-3 rounded-2xl border flex items-center justify-between gap-3 transition-colors ${
-                        editingId === p.id
-                          ? "bg-[#E85D2A]/10 border-[#E85D2A]/40"
-                          : "bg-black/45 border-white/[0.07]"
-                      }`}
-                    >
-                      <div className="flex items-center gap-3 min-w-0">
-                        <img
-                          src={p.imageUrl}
-                          alt={p.title}
-                          className="w-12 h-12 rounded-xl object-cover border border-white/10 shrink-0 bg-[#18181B]"
-                        />
-                        <div className="min-w-0">
-                          <h4 className="font-semibold text-xs text-[#F5F3EE] truncate">
-                            {p.title}
-                          </h4>
-                          <p className="text-[11px] text-[#8A8780] font-mono truncate mt-0.5">
-                            {(p.tags || []).join(" · ")}
-                          </p>
-                        </div>
-                      </div>
-                      <div className="flex items-center gap-1.5 shrink-0">
-                        <button
-                          type="button"
-                          onClick={() => handleStartEdit(p)}
-                          disabled={isItemBusy}
-                          title="تعديل"
-                          className="w-9 h-9 rounded-xl bg-white/[0.04] hover:bg-white/[0.1] border border-white/[0.08] text-[#D6D3CD] flex items-center justify-center transition-colors disabled:opacity-50"
-                        >
-                          <Pencil className="w-3.5 h-3.5" />
+            <textarea
+              rows={3} className="field" disabled={aiBusy || publishing}
+              placeholder="مثال: سكربت بايثون يحوّل أي صورة إلى رسم ASCII ملوّن في الطرفية"
+              value={form.rawNotes} onChange={set("rawNotes")}
+              onKeyDown={(e) => { if ((e.ctrlKey || e.metaKey) && e.key === "Enter") { e.preventDefault(); generate(); } }}
+            />
+
+            <button type="button" onClick={generate} disabled={aiBusy || publishing}
+              className="w-full h-12 rounded-2xl bg-iris text-bone font-semibold flex items-center justify-center gap-2 disabled:opacity-60 active:scale-[0.98] transition-transform">
+              {aiBusy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Wand2 className="w-4 h-4" />}
+              {aiBusy ? "جاري الصياغة…" : form.descAr ? "أعد الصياغة" : "صِغ الوصف"}
+            </button>
+
+            <AnimatePresence>
+              {suggest && (
+                <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: "auto" }} exit={{ opacity: 0, height: 0 }} className="overflow-hidden">
+                  <div className="p-3 rounded-2xl bg-plum space-y-2 text-sm">
+                    <p className="text-xs text-bone/50">اقتراحات من الذكاء الاصطناعي</p>
+                    <div className="flex flex-wrap gap-2">
+                      {suggest.title && !form.title && (
+                        <button type="button" onClick={() => setForm((f) => ({ ...f, title: suggest.title }))} className="h-9 px-3 rounded-full bg-sun text-ink text-xs font-semibold">
+                          العنوان: {suggest.title}
                         </button>
-                        <button
-                          type="button"
-                          onClick={() => handleToggleFeatured(p)}
-                          disabled={isItemBusy}
-                          title="تمييز"
-                          className={`w-9 h-9 rounded-xl border flex items-center justify-center transition-colors disabled:opacity-50 ${
-                            p.featured
-                              ? "bg-[#E85D2A]/15 border-[#E85D2A]/45 text-[#E85D2A]"
-                              : "bg-white/[0.04] border-white/[0.08] text-[#8A8780] hover:text-[#F5F3EE]"
-                          }`}
-                        >
-                          {isItemBusy ? (
-                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                          ) : (
-                            <Star className="w-3.5 h-3.5" />
-                          )}
+                      )}
+                      {suggest.tags.length > 0 && (
+                        <button type="button" onClick={() => mergeTags(suggest.tags)} className="h-9 px-3 rounded-full bg-sun text-ink text-xs font-semibold" dir="ltr">
+                          + {suggest.tags.join(", ")}
                         </button>
-                        <button
-                          type="button"
-                          onClick={() => handleDeleteProject(p)}
-                          disabled={isItemBusy}
-                          title={isConfirmingDelete ? "اضغط مجدداً لتأكيد الحذف" : "حذف"}
-                          className={`h-9 px-2.5 rounded-xl border flex items-center justify-center gap-1 text-[11px] font-medium transition-colors disabled:opacity-50 ${
-                            isConfirmingDelete
-                              ? "bg-rose-500 border-rose-400 text-white"
-                              : "bg-white/[0.04] hover:bg-rose-500/15 border-white/[0.08] hover:border-rose-500/35 text-[#8A8780] hover:text-rose-400"
-                          }`}
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                          {isConfirmingDelete && <span>تأكيد</span>}
-                        </button>
-                      </div>
+                      )}
                     </div>
-                  );
-                })
+                  </div>
+                </motion.div>
               )}
+            </AnimatePresence>
+
+            <div className="grid md:grid-cols-2 gap-3">
+              <div>
+                <textarea rows={4} required className="field" disabled={aiBusy || publishing} placeholder="الوصف النهائي بالعربي" value={form.descAr} onChange={set("descAr")} />
+                <p className="text-xs text-bone/40 mt-1 tabular-nums">{form.descAr.length} حرف</p>
+              </div>
+              <div>
+                <textarea rows={4} required dir="ltr" className="field" disabled={aiBusy || publishing} placeholder="Final English description" value={form.descEn} onChange={set("descEn")} />
+                <p className="text-xs text-bone/40 mt-1 tabular-nums" dir="ltr">{form.descEn.length} chars</p>
+              </div>
             </div>
+            {aiMeta && (
+              <p className="text-xs text-bone/45 flex items-center gap-1.5">
+                <Wand2 className="w-3.5 h-3.5" />
+                {VIA_LABEL[aiMeta.via]}{aiMeta.model ? ` (${aiMeta.model})` : ""}
+              </p>
+            )}
+          </div>
+
+          <div className="grid sm:grid-cols-2 gap-3">
+            <DropZone icon={ImageIcon} label={editing ? "استبدال الصورة (اختياري)" : "صورة المشروع"} accept="image/*" file={imageFile} preview={imagePreview} onFile={setImageFile} disabled={publishing} />
+            <DropZone icon={FileArchive} label={editing ? "استبدال ملف ZIP (اختياري)" : "ملف الكود (.zip)"} accept=".zip,.rar,.7z" file={zipFile} onFile={setZipFile} disabled={publishing} />
+          </div>
+          {zipFile && zipFile.size > MAX_BYTES && (
+            <Notice n={{ type: "warn", ...diagnoseError({ code: "payload too large" }, "ar") }} />
+          )}
+
+          <Notice n={notice} onClose={() => setNotice(null)} />
+
+          {/* sticky on phones so the main action is always under the thumb */}
+          <div className="fixed lg:static bottom-0 inset-x-0 z-30 p-3 pb-safe lg:p-0 bg-ink/90 lg:bg-transparent backdrop-blur-md lg:backdrop-blur-none border-t-2 border-haze lg:border-0 flex items-center gap-3">
+            <label className="flex items-center gap-2.5 text-sm cursor-pointer select-none h-12">
+              <input type="checkbox" checked={form.featured} disabled={publishing} onChange={set("featured")} className="h-5 w-5 accent-[#FFC857]" />
+              مختار
+            </label>
+            <button type="submit" disabled={publishing}
+              className="flex-1 lg:flex-none lg:px-8 h-12 rounded-2xl bg-sun text-ink font-semibold flex items-center justify-center gap-2 disabled:opacity-70 active:scale-[0.98] transition-transform lg:ms-auto">
+              {publishing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Upload className="w-4 h-4" />}
+              {publishLabel}
+            </button>
+          </div>
+        </form>
+
+        {/* LIST */}
+        <div className="lg:col-span-5 rounded-[28px] bg-plum border-2 border-haze p-5 h-fit lg:sticky lg:top-20">
+          <div className="flex items-center justify-between mb-4">
+            <h2 className="font-display text-2xl">المنشور</h2>
+            <span className="text-sm text-bone/50 tabular-nums">{loadingProjects ? "…" : projects.length}</span>
+          </div>
+          <div className="space-y-2.5 lg:max-h-[70dvh] overflow-y-auto overscroll-contain">
+            {loadingProjects ? (
+              <div className="py-10 flex justify-center"><Loader2 className="w-5 h-5 animate-spin text-bone/50" /></div>
+            ) : projects.length === 0 ? (
+              <p className="text-sm text-bone/50 py-8 text-center">لا مشاريع بعد.</p>
+            ) : (
+              projects.map((p) => {
+                const b = busyId === p.id;
+                return (
+                  <div key={p.id} className={`p-3 rounded-2xl bg-ink flex items-center gap-3 border-2 ${editing === p.id ? "border-sun" : "border-transparent"}`}>
+                    <img src={p.imageUrl} alt="" className="w-14 h-14 rounded-xl object-cover shrink-0" />
+                    <div className="min-w-0 flex-1">
+                      <h4 className="font-semibold text-sm truncate">{p.title}</h4>
+                      <p className="text-xs text-bone/45 truncate mt-0.5" dir="ltr">
+                        {[(p.tags || []).join(", "), p.zipSize && formatSize(p.zipSize), p.downloads > 0 && `${p.downloads}↓`].filter(Boolean).join("  ")}
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-1 shrink-0">
+                      <button onClick={() => startEdit(p)} disabled={b} aria-label="تعديل" className="h-10 w-10 rounded-full bg-plum flex items-center justify-center text-bone/70 active:scale-95"><Pencil className="w-4 h-4" /></button>
+                      <button onClick={() => toggleFeatured(p)} disabled={b} aria-label="تمييز" className={`h-10 w-10 rounded-full flex items-center justify-center active:scale-95 ${p.featured ? "bg-sun text-ink" : "bg-plum text-bone/70"}`}>
+                        {b ? <Loader2 className="w-4 h-4 animate-spin" /> : <Star className="w-4 h-4" />}
+                      </button>
+                      <button onClick={() => remove(p)} disabled={b} aria-label="حذف" className="h-10 w-10 rounded-full bg-plum flex items-center justify-center text-flare active:scale-95"><Trash2 className="w-4 h-4" /></button>
+                    </div>
+                  </div>
+                );
+              })
+            )}
           </div>
         </div>
       </div>

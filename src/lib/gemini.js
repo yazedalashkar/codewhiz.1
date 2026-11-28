@@ -1,241 +1,75 @@
-import { withTimeout } from "./diagnostics";
+import { buildPrompt, runGemini } from "../../api/_gemini.js";
+import { getIdToken } from "./firebase";
 
-const FALLBACK_MODELS = [
-  "gemini-2.5-flash",
-  "gemini-2.0-flash",
-  "gemini-2.0-flash-lite",
-  "gemini-1.5-flash-latest",
-  "gemini-1.5-flash",
-];
+export { TONES } from "../../api/_gemini.js";
 
-function getCleanApiKey() {
-  return (import.meta.env.VITE_GEMINI_API_KEY || "")
-    .trim()
-    .replace(/^["']|["']$/g, "");
-}
-
-function extractJsonObject(rawText) {
-  if (!rawText || typeof rawText !== "string") {
-    throw new Error("استجابة فارغة من نموذج الذكاء الاصطناعي");
-  }
-  const cleaned = rawText
-    .replace(/```json\s*/gi, "")
-    .replace(/```\s*/g, "")
-    .trim();
-
-  const start = cleaned.indexOf("{");
-  const end = cleaned.lastIndexOf("}");
-  const candidate =
-    start !== -1 && end > start ? cleaned.slice(start, end + 1) : cleaned;
-
-  try {
-    return JSON.parse(candidate);
-  } catch {
-    const repaired = candidate.replace(/\r?\n/g, " ").replace(/,\s*}/g, "}");
-    return JSON.parse(repaired);
-  }
-}
-
-function createGeminiError(code, status, googleMessage) {
-  const err = new Error(googleMessage || code);
+function fail(code, extra = {}) {
+  const err = new Error(code);
   err.code = code;
-  err.status = status;
-  err.googleMessage = googleMessage || "";
+  Object.assign(err, extra);
   return err;
 }
 
+const cleanKey = () =>
+  (import.meta.env.VITE_GEMINI_API_KEY || "").trim().replace(/^["']|["']$/g, "");
+
 /**
- * Primary route: calls Vercel Serverless proxy `/api/generate-description`
- * (bypasses regional geo-blocks and keeps keys cleaner).
- * Falls back to direct client-side Gemini REST API during local `npm run dev`.
+ * 1) Try the server route /api/describe (key stays secret, works from regions where Google blocks Gemini).
+ * 2) If the route doesn't exist (local `vite dev`) or is unreachable, call Gemini directly with VITE_GEMINI_API_KEY.
  */
-export async function generateBilingualDescription({
-  rawNotes,
-  tags = "",
-  title = "",
-  tone = "technical",
-}) {
-  if (!rawNotes || !rawNotes.trim()) {
-    throw createGeminiError("gemini-empty-notes", 400, "");
-  }
+export async function generateProjectCopy({ rawNotes, tags, title, tone }) {
+  if (!rawNotes || !rawNotes.trim()) throw fail("gemini-empty-notes");
 
-  const apiKey = getCleanApiKey();
-
-  // 1) Try Vercel Serverless Proxy first (works in production & vercel dev)
+  let serverError = null;
   try {
-    const proxyRes = await withTimeout(
-      fetch("/api/generate-description", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          rawNotes: rawNotes.trim(),
-          tags,
-          title,
-          tone,
-          apiKey,
-        }),
-      }),
-      26000
-    );
+    const token = await getIdToken();
+    const res = await fetch("/api/describe", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      body: JSON.stringify({ rawNotes, tags, title, tone }),
+    });
+    const isJson = (res.headers.get("content-type") || "").includes("application/json");
 
-    const contentType = proxyRes.headers.get("content-type") || "";
-    if (proxyRes.ok && contentType.includes("application/json")) {
-      const data = await proxyRes.json();
-      if (data?.ar || data?.en) {
-        return {
-          ar: String(data.ar || "").trim(),
-          en: String(data.en || "").trim(),
-          model: data.model || "gemini-proxy",
-          via: "server",
-        };
-      }
-    } else if (proxyRes.status !== 404 && proxyRes.status !== 405 && contentType.includes("application/json")) {
-      const errJson = await proxyRes.json().catch(() => ({}));
-      const errObj = errJson?.error;
-      if (errObj?.code && errObj.code !== "gemini-missing-key") {
-        throw createGeminiError(
-          errObj.code,
-          errObj.status || proxyRes.status,
-          errObj.message || ""
-        );
-      }
+    if (res.ok && isJson) return { ...(await res.json()), via: "server" };
+
+    if (isJson) {
+      const body = await res.json().catch(() => ({}));
+      const e = body?.error || {};
+      serverError = fail(e.code || `gemini-${res.status}`, {
+        status: e.status || res.status,
+        googleMessage: e.message || "",
+      });
     }
-  } catch (proxyErr) {
-    // If the proxy explicitly returned a Gemini API error (like invalid key/quota), rethrow it
-    if (proxyErr?.code && String(proxyErr.code).startsWith("gemini-")) {
-      throw proxyErr;
-    }
-    // Otherwise (e.g. local Vite dev server without /api), continue to direct client call
+    // Non-JSON or 404 = route not deployed (vite dev) -> fall through to direct call.
+  } catch {
+    // network error reaching our own server -> fall through
   }
 
-  // 2) Direct client-side fallback (useful on local Vite dev server)
-  if (!apiKey) {
-    throw createGeminiError("gemini-missing-key", 400, "");
+  if (serverError && ["ai-unauthorized", "gemini-empty-notes"].includes(serverError.code)) throw serverError;
+
+  const apiKey = cleanKey();
+  if (!apiKey) throw serverError || fail("gemini-missing-key");
+
+  try {
+    return { ...(await runGemini({ apiKey, prompt: buildPrompt({ rawNotes, tags, title, tone }) })), via: "browser" };
+  } catch (err) {
+    throw err || serverError;
   }
-
-  const styleGuide =
-    tone === "concise"
-      ? "Keep each language ultra-concise (1 crisp sentence, under 22 words)."
-      : "Keep each language natural, clear, and practical (2 concise sentences max).";
-
-  const prompt = `You are a senior technical editor for a developer code archive (@codewhiz.1).
-Rewrite and polish the rough project notes below into clean, developer-focused descriptions in BOTH Arabic ("ar") and English ("en").
-
-Project Title (optional context): ${String(title).trim() || "Untitled"}
-Technologies / Tags: ${String(tags).trim() || "General"}
-Rough Notes:
----
-${rawNotes.trim()}
----
-
-Rules:
-- Base your description strictly on the rough notes provided above.
-- ${styleGuide}
-- Clearly explain what the code does and what the developer gets inside the ZIP archive.
-- Avoid marketing hype, clichés, or emojis.
-- Return valid JSON ONLY with exact keys "ar" and "en":
-{"ar": "...", "en": "..."}`;
-
-  let lastError = null;
-
-  for (const model of FALLBACK_MODELS) {
-    for (const useJsonMime of [true, false]) {
-      try {
-        const generationConfig = { temperature: 0.45 };
-        if (useJsonMime) {
-          generationConfig.responseMimeType = "application/json";
-        }
-
-        const response = await withTimeout(
-          fetch(
-            `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(
-              apiKey
-            )}`,
-            {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                contents: [{ parts: [{ text: prompt }] }],
-                generationConfig,
-              }),
-            }
-          ),
-          25000
-        );
-
-        if (!response.ok) {
-          const errBody = await response.json().catch(() => ({}));
-          const googleMessage = errBody?.error?.message || "";
-          const err = createGeminiError(
-            `gemini-${response.status}`,
-            response.status,
-            googleMessage
-          );
-          lastError = err;
-
-          if (response.status === 400 && useJsonMime) {
-            continue;
-          }
-          if ([404, 429, 500, 503].includes(response.status)) {
-            break;
-          }
-          throw err;
-        }
-
-        const data = await response.json();
-        const text =
-          data?.candidates?.[0]?.content?.parts
-            ?.map((p) => p.text || "")
-            .join("") || "{}";
-        const parsed = extractJsonObject(text);
-
-        const ar = String(parsed?.ar || "").trim();
-        const en = String(parsed?.en || "").trim();
-
-        if (!ar && !en) {
-          lastError = createGeminiError("gemini-empty-output", 502, "Empty output");
-          continue;
-        }
-
-        return { ar, en, model, via: "client" };
-      } catch (err) {
-        lastError = err;
-        if (err?.status && [404, 429, 500, 503].includes(err.status)) {
-          break;
-        }
-        if (err?.code === "request-timeout") {
-          break;
-        }
-        throw err;
-      }
-    }
-  }
-
-  throw lastError || createGeminiError("gemini-unavailable", 503, "");
 }
 
-/**
- * Offline / Fallback Smart Formatter so admin is never blocked even without API access.
- */
-export function generateLocalFallbackDescription({ rawNotes, tags = "", title = "" }) {
-  const cleanNotes = String(rawNotes || "").trim().replace(/\s+/g, " ");
-  const tagList = String(tags || "")
-    .split(",")
-    .map((t) => t.trim())
-    .filter(Boolean);
-  const techText = tagList.length ? tagList.join("، ") : "تقنيات برمجية حديثة";
-  const techTextEn = tagList.length ? tagList.join(", ") : "modern web & scripting tools";
-  const cleanTitle = String(title || "").trim();
-
-  const hasArabic = /[\u0600-\u06FF]/.test(cleanNotes);
-
-  const ar = hasArabic
-    ? `${cleanNotes.endsWith(".") ? cleanNotes : `${cleanNotes}.`} مبني باستخدام ${techText}، ويتضمّن ملف ZIP الكود المصدري الكامل جاهزاً للتشغيل والتعديل المباشر.`
-    : `${cleanTitle ? `مشروع ${cleanTitle}: ` : ""}${cleanNotes}. مبني باستخدام ${techText}، ويتضمّن ملف ZIP الكود المصدري المنظّم وجاهزاً للتشغيل الفوري.`;
-
-  const en = !hasArabic
-    ? `${cleanNotes.endsWith(".") ? cleanNotes : `${cleanNotes}.`} Built with ${techTextEn}, packaged as a clean, ready-to-run ZIP archive.`
-    : `${cleanTitle ? `${cleanTitle} — ` : ""}A practical developer utility built with ${techTextEn}. Includes the complete source code packaged in a ready-to-run ZIP archive.`;
-
-  return { ar, en, via: "local" };
+// Last-resort draft when every AI route failed. Not AI: it only tidies the notes into a template.
+export function localDraft({ rawNotes, tags }) {
+  const notes = rawNotes.trim().replace(/\s+/g, " ").replace(/[.\u06D4]+$/, "");
+  const techs = (tags || "").split(",").map((t) => t.trim()).filter(Boolean).slice(0, 3).join(" / ");
+  const isArabic = /[\u0600-\u06FF]/.test(notes);
+  const ar = isArabic
+    ? `${notes}. حمّل ملف ZIP لتحصل على الكود المصدري كاملاً وجاهزاً للتشغيل.`
+    : `مشروع${techs ? ` بتقنية ${techs}` : ""}. حمّل ملف ZIP لتحصل على الكود المصدري كاملاً وجاهزاً للتشغيل.`;
+  const en = isArabic
+    ? `Source code${techs ? ` built with ${techs}` : ""}. Download the ZIP to get the full project, ready to run.`
+    : `${notes}. Download the ZIP to get the full source, ready to run.`;
+  return { ar, en, title: "", tags: [], via: "local" };
 }
